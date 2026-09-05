@@ -1,0 +1,2316 @@
+import pytest
+
+from yandex_music import (
+    R128,
+    Account,
+    AdParams,
+    Album,
+    AlbumActionButton,
+    AlbumEvent,
+    AlbumSimilarEntities,
+    AlbumTrailer,
+    Alert,
+    AlertButton,
+    Artist,
+    ArtistAbout,
+    ArtistClipData,
+    ArtistClipItem,
+    ArtistClips,
+    ArtistConcerts,
+    ArtistDonationData,
+    ArtistDonationGoal,
+    ArtistDonationItem,
+    ArtistDonations,
+    ArtistEvent,
+    ArtistInfo,
+    ArtistLink,
+    ArtistLinks,
+    ArtistSimilar,
+    ArtistSkeleton,
+    ArtistTrailer,
+    ArtistTrailerStatus,
+    AutoRenewable,
+    Best,
+    Block,
+    BlockEntity,
+    Brand,
+    CaseForms,
+    Chart,
+    ChartInfo,
+    ChartInfoMenu,
+    ChartInfoMenuItem,
+    ChartItem,
+    Client,
+    Clip,
+    ClipsWillLike,
+    Concert,
+    ConcertCashback,
+    ConcertDescription,
+    ConcertEventInfo,
+    ConcertFeed,
+    ConcertFeedItem,
+    ConcertFeedItemData,
+    ConcertInfo,
+    ConcertLocation,
+    ConcertLocations,
+    ConcertMinPrice,
+    ConcertSkeleton,
+    ConcertTabConfig,
+    ConcertTabConfigData,
+    ConcertTabRange,
+    ContentRestrictions,
+    Contest,
+    Context,
+    Counts,
+    Cover,
+    CoverDerivedColors,
+    Credit,
+    Credits,
+    CustomWave,
+    Day,
+    Deactivation,
+    Deprecation,
+    Description,
+    DeviceCode,
+    Disclaimer,
+    DiscreteScale,
+    Enum,
+    Event,
+    ExperimentDetail,
+    ExperimentDetailValue,
+    ExperimentsDetails,
+    Fade,
+    ForeignAgent,
+    GeneratedPlaylist,
+    Icon,
+    Id,
+    Images,
+    InvocationInfo,
+    Label,
+    LicenceTextPart,
+    Link,
+    Lyrics,
+    LyricsInfo,
+    LyricsMajor,
+    MadeFor,
+    Major,
+    MetaData,
+    Metatag,
+    MetatagAlbums,
+    MetatagArtistEntry,
+    MetatagArtists,
+    MetatagLeaf,
+    MetatagPlaylists,
+    Metatags,
+    MetatagSortByValue,
+    MetatagTitle,
+    MetatagTree,
+    MixLink,
+    MusicHistory,
+    MusicHistoryContextFullModel,
+    MusicHistoryGroup,
+    MusicHistoryItem,
+    MusicHistoryItemData,
+    MusicHistoryItemId,
+    MusicHistoryItems,
+    MusicHistoryTab,
+    NonAutoRenewable,
+    Normalization,
+    OAuthToken,
+    OpenGraphData,
+    Operator,
+    Pager,
+    PassportPhone,
+    Permissions,
+    PersonalPlaylistsData,
+    Pin,
+    PinData,
+    PinsList,
+    PlayContext,
+    PlayContextsData,
+    PlayCounter,
+    Playlist,
+    PlaylistAbsence,
+    PlaylistAvailability,
+    PlaylistId,
+    PlaylistSimilarEntities,
+    PlaylistsList,
+    PlaylistTrailer,
+    Plus,
+    PoetryLoverMatch,
+    Presaves,
+    Price,
+    Product,
+    Promotion,
+    Ratings,
+    RenewableRemainder,
+    Restrictions,
+    RotorSettings,
+    SearchResult,
+    Sequence,
+    Settings,
+    Shot,
+    ShotData,
+    ShotType,
+    SimilarEntityData,
+    SimilarEntityItem,
+    SkeletonBlock,
+    SkeletonBlockData,
+    SkeletonSource,
+    SkeletonTab,
+    SkeletonViewAllAction,
+    SmartPreviewParams,
+    Station,
+    StationData,
+    StationResult,
+    Stats,
+    Status,
+    Subscription,
+    Tag,
+    Title,
+    Track,
+    TrackFullInfo,
+    TrackId,
+    TrackLyrics,
+    TrackPosition,
+    TrackShort,
+    TrackShortOld,
+    TrackTrailer,
+    TrackWithAds,
+    TrailerInfo,
+    User,
+    Value,
+    Video,
+    VideoSupplement,
+    Vinyl,
+    Wave,
+    WaveAgent,
+    WaveAgentEntity,
+)
+
+from . import (
+    TestAccount,
+    TestAdParams,
+    TestAlbum,
+    TestAlbumActionButton,
+    TestAlert,
+    TestAlertButton,
+    TestArtist,
+    TestArtistAbout,
+    TestArtistClipItem,
+    TestArtistConcerts,
+    TestArtistDonationData,
+    TestArtistDonationGoal,
+    TestArtistDonationItem,
+    TestArtistEvent,
+    TestArtistInfo,
+    TestArtistLink,
+    TestArtistSkeleton,
+    TestArtistTrailerStatus,
+    TestAutoRenewable,
+    TestBest,
+    TestBlock,
+    TestBlockEntity,
+    TestBrand,
+    TestCaseForms,
+    TestChart,
+    TestChartInfo,
+    TestChartInfoMenuItem,
+    TestClip,
+    TestConcert,
+    TestConcertCashback,
+    TestConcertDescription,
+    TestConcertEventInfo,
+    TestConcertFeedItem,
+    TestConcertInfo,
+    TestConcertLocation,
+    TestConcertMinPrice,
+    TestConcertSkeleton,
+    TestConcertTabRange,
+    TestContentRestrictions,
+    TestContest,
+    TestContext,
+    TestCounts,
+    TestCover,
+    TestCoverDerivedColors,
+    TestCredit,
+    TestCustomWave,
+    TestDay,
+    TestDeactivation,
+    TestDeprecation,
+    TestDescription,
+    TestDeviceCode,
+    TestDiscreteScale,
+    TestEnum,
+    TestEvent,
+    TestExperimentDetail,
+    TestExperimentDetailValue,
+    TestFade,
+    TestForeignAgent,
+    TestGeneratedPlaylist,
+    TestIcon,
+    TestId,
+    TestImages,
+    TestInvocationInfo,
+    TestLabel,
+    TestLicenceTextPart,
+    TestLink,
+    TestLyrics,
+    TestLyricsInfo,
+    TestLyricsMajor,
+    TestMajor,
+    TestMetaData,
+    TestMetatag,
+    TestMetatagAlbums,
+    TestMetatagArtists,
+    TestMetatagLeaf,
+    TestMetatagPlaylists,
+    TestMetatagSortByValue,
+    TestMetatagTitle,
+    TestMetatagTree,
+    TestMixLink,
+    TestMusicHistoryContextFullModel,
+    TestMusicHistoryItem,
+    TestMusicHistoryItemId,
+    TestMusicHistoryTab,
+    TestNonAutoRenewable,
+    TestNormalization,
+    TestOAuthToken,
+    TestOpenGraphData,
+    TestOperator,
+    TestPager,
+    TestPassportPhone,
+    TestPermissions,
+    TestPersonalPlaylistsData,
+    TestPin,
+    TestPinData,
+    TestPlayContext,
+    TestPlayCounter,
+    TestPlaylist,
+    TestPlaylistAbsence,
+    TestPlaylistAvailability,
+    TestPlaylistId,
+    TestPlaylistTrailer,
+    TestPlus,
+    TestPoetryLoverMatch,
+    TestPrice,
+    TestProduct,
+    TestPromotion,
+    TestR128,
+    TestRatings,
+    TestRenewableRemainder,
+    TestRotorSettings,
+    TestSearchResult,
+    TestSequence,
+    TestSettings,
+    TestShot,
+    TestShotData,
+    TestShotType,
+    TestSimilarEntityItem,
+    TestSkeletonBlock,
+    TestSkeletonBlockData,
+    TestSkeletonSource,
+    TestSkeletonTab,
+    TestSkeletonViewAllAction,
+    TestSmartPreviewParams,
+    TestStation,
+    TestStationData,
+    TestStationResult,
+    TestStats,
+    TestStatus,
+    TestSubscription,
+    TestTag,
+    TestTitle,
+    TestTrack,
+    TestTrackFullInfo,
+    TestTrackId,
+    TestTrackLyrics,
+    TestTrackPosition,
+    TestTrackShort,
+    TestTrackShortOld,
+    TestTrackTrailer,
+    TestTrackWithAds,
+    TestTrailerInfo,
+    TestUser,
+    TestValue,
+    TestVideo,
+    TestVideoSupplement,
+    TestVinyl,
+    TestWave,
+    TestWaveAgent,
+    TestWaveAgentEntity,
+)
+
+
+@pytest.fixture(scope='session')
+def artist_factory(cover, counts, ratings, link, description, content_restrictions):
+    class ArtistFactory:
+        def get(self, popular_tracks, decomposed=None):
+            return Artist(
+                TestArtist.id,
+                TestArtist.error,
+                TestArtist.reason,
+                TestArtist.name,
+                cover,
+                TestArtist.various,
+                TestArtist.composer,
+                TestArtist.genres,
+                TestArtist.og_image,
+                TestArtist.op_image,
+                TestArtist.no_pictures_from_search,
+                counts,
+                TestArtist.available,
+                ratings,
+                [link],
+                TestArtist.tickets_available,
+                TestArtist.likes_count,
+                popular_tracks,
+                TestArtist.regions,
+                decomposed,
+                TestArtist.full_names,
+                TestArtist.hand_made_description,
+                description,
+                TestArtist.countries,
+                TestArtist.en_wikipedia_link,
+                TestArtist.db_aliases,
+                TestArtist.aliases,
+                TestArtist.init_date,
+                TestArtist.end_date,
+                TestArtist.ya_money_id,
+                TestArtist.disclaimers,
+                content_restrictions,
+            )
+
+    return ArtistFactory()
+
+
+@pytest.fixture(scope='session')
+def artist(artist_factory, track_without_artists_and_albums, artist_decomposed):
+    return artist_factory.get([track_without_artists_and_albums], artist_decomposed)
+
+
+@pytest.fixture(scope='session')
+def artist_without_nested_artist(artist_factory, track_without_artists_and_albums):
+    return artist_factory.get([track_without_artists_and_albums])
+
+
+@pytest.fixture(scope='session')
+def artist_without_tracks(artist_factory):
+    return artist_factory.get([])
+
+
+@pytest.fixture(scope='session')
+def artist_decomposed(artist_without_nested_artist):
+    return [' & ', artist_without_nested_artist]
+
+
+@pytest.fixture(scope='session')
+def track_factory(major, normalization, user, meta_data, poetry_lover_match, r_128, lyrics_info):
+    class TrackFactory:
+        def get(self, artists, albums, track_without_nested_tracks=None):
+            return Track(
+                TestTrack.id,
+                TestTrack.title,
+                TestTrack.available,
+                artists,
+                albums,
+                TestTrack.available_for_premium_users,
+                TestTrack.lyrics_available,
+                [poetry_lover_match],
+                TestTrack.best,
+                TestTrack.real_id,
+                TestTrack.og_image,
+                TestTrack.type,
+                TestTrack.cover_uri,
+                major,
+                TestTrack.duration_ms,
+                TestTrack.storage_dir,
+                TestTrack.file_size,
+                track_without_nested_tracks,
+                track_without_nested_tracks,
+                normalization,
+                TestTrack.error,
+                TestTrack.can_publish,
+                TestTrack.state,
+                TestTrack.desired_visibility,
+                TestTrack.filename,
+                user,
+                meta_data,
+                TestTrack.regions,
+                TestTrack.available_as_rbt,
+                TestTrack.content_warning,
+                TestTrack.explicit,
+                TestTrack.preview_duration_ms,
+                TestTrack.available_full_without_permission,
+                TestTrack.version,
+                TestTrack.remember_position,
+                TestTrack.background_video_uri,
+                TestTrack.short_description,
+                TestTrack.is_suitable_for_children,
+                TestTrack.track_source,
+                TestTrack.available_for_options,
+                r_128,
+                lyrics_info,
+                TestTrack.track_sharing_flag,
+            )
+
+    return TrackFactory()
+
+
+@pytest.fixture(scope='session')
+def track(track_factory, artist, album, track_without_nested_tracks):
+    return track_factory.get([artist], [album], track_without_nested_tracks)
+
+
+@pytest.fixture(scope='session')
+def track_without_artists(track_factory, album):
+    return track_factory.get([], [album])
+
+
+@pytest.fixture(scope='session')
+def track_without_albums(track_factory, artist):
+    return track_factory.get([artist], [])
+
+
+@pytest.fixture(scope='session')
+def track_without_artists_and_albums(track_factory):
+    return track_factory.get([], [])
+
+
+@pytest.fixture(scope='session')
+def track_without_nested_tracks(artist, album, track_factory):
+    return track_factory.get([artist], [album])
+
+
+@pytest.fixture(scope='session')
+def lyrics_major():
+    return LyricsMajor(
+        TestLyricsMajor.id,
+        TestLyricsMajor.name,
+        TestLyricsMajor.pretty_name,
+    )
+
+
+@pytest.fixture(scope='session')
+def track_lyrics(lyrics_major):
+    return TrackLyrics(
+        TestTrackLyrics.download_url,
+        TestTrackLyrics.lyric_id,
+        TestTrackLyrics.external_lyric_id,
+        TestTrackLyrics.writer,
+        lyrics_major,
+    )
+
+
+@pytest.fixture(scope='session')
+def album_action_button():
+    return AlbumActionButton(
+        TestAlbumActionButton.text,
+        TestAlbumActionButton.url,
+        TestAlbumActionButton.color,
+    )
+
+
+@pytest.fixture(scope='session')
+def album_factory(label, track_position, album_action_button):
+    class AlbumFactory:
+        def get(self, artists, volumes, albums=None, deprecation=None):
+            return Album(
+                TestAlbum.id,
+                TestAlbum.error,
+                TestAlbum.title,
+                TestAlbum.track_count,
+                artists,
+                [label],
+                TestAlbum.available,
+                TestAlbum.available_for_premium_users,
+                TestAlbum.version,
+                TestAlbum.cover_uri,
+                TestAlbum.content_warning,
+                TestAlbum.original_release_year,
+                TestAlbum.genre,
+                TestAlbum.text_color,
+                TestAlbum.short_description,
+                TestAlbum.description,
+                TestAlbum.is_premiere,
+                TestAlbum.is_banner,
+                TestAlbum.meta_type,
+                TestAlbum.storage_dir,
+                TestAlbum.og_image,
+                TestAlbum.buy,
+                TestAlbum.recent,
+                TestAlbum.very_important,
+                TestAlbum.available_for_mobile,
+                TestAlbum.available_partially,
+                TestAlbum.bests,
+                albums,
+                TestAlbum.prerolls,
+                volumes,
+                TestAlbum.year,
+                TestAlbum.release_date,
+                TestAlbum.type,
+                track_position,
+                TestAlbum.regions,
+                TestAlbum.available_as_rbt,
+                TestAlbum.lyrics_available,
+                TestAlbum.remember_position,
+                albums,
+                TestAlbum.duration_ms,
+                TestAlbum.explicit,
+                TestAlbum.start_date,
+                TestAlbum.likes_count,
+                deprecation,
+                TestAlbum.available_regions,
+                TestAlbum.available_for_options,
+                disclaimers=TestAlbum.disclaimers,
+                action_button=album_action_button,
+            )
+
+    return AlbumFactory()
+
+
+@pytest.fixture(scope='session')
+def album(album_factory, artist_without_tracks, track_without_albums, album_without_nested_albums, deprecation):
+    return album_factory.get(
+        [artist_without_tracks], [[track_without_albums]], [album_without_nested_albums], deprecation
+    )
+
+
+@pytest.fixture(scope='session')
+def album_without_tracks(album_factory, artist_without_tracks):
+    return album_factory.get([artist_without_tracks], [])
+
+
+@pytest.fixture(scope='session')
+def album_without_nested_albums(album_factory, artist_without_tracks, track_without_albums):
+    return album_factory.get([artist_without_tracks], [[track_without_albums]])
+
+
+@pytest.fixture(scope='session')
+def playlist_factory(
+    user,
+    cover,
+    made_for,
+    track_short,
+    play_counter,
+    playlist_absence,
+    artist,
+    track_id,
+    contest,
+    open_graph_data,
+    brand,
+    custom_wave,
+    pager,
+):
+    class PlaylistFactory:
+        def get(self, similar_playlists, last_owner_playlists):
+            return Playlist(
+                user,
+                cover,
+                made_for,
+                play_counter,
+                playlist_absence,
+                TestPlaylist.uid,
+                TestPlaylist.kind,
+                TestPlaylist.title,
+                TestPlaylist.track_count,
+                TestPlaylist.tags,
+                TestPlaylist.revision,
+                TestPlaylist.snapshot,
+                TestPlaylist.visibility,
+                TestPlaylist.collective,
+                TestPlaylist.url_part,
+                TestPlaylist.created,
+                TestPlaylist.modified,
+                TestPlaylist.available,
+                TestPlaylist.is_banner,
+                TestPlaylist.is_premiere,
+                TestPlaylist.duration_ms,
+                TestPlaylist.og_image,
+                TestPlaylist.og_title,
+                TestPlaylist.og_description,
+                TestPlaylist.image,
+                cover,
+                contest,
+                TestPlaylist.background_color,
+                TestPlaylist.text_color,
+                TestPlaylist.id_for_from,
+                TestPlaylist.dummy_description,
+                TestPlaylist.dummy_page_description,
+                cover,
+                cover,
+                open_graph_data,
+                brand,
+                TestPlaylist.metrika_id,
+                TestPlaylist.coauthors,
+                [artist],
+                [track_id],
+                [track_short],
+                TestPlaylist.prerolls,
+                TestPlaylist.likes_count,
+                similar_playlists,
+                last_owner_playlists,
+                TestPlaylist.generated_playlist_type,
+                TestPlaylist.animated_cover_uri,
+                TestPlaylist.ever_played,
+                TestPlaylist.description,
+                TestPlaylist.description_formatted,
+                TestPlaylist.playlist_uuid,
+                TestPlaylist.type,
+                TestPlaylist.ready,
+                TestPlaylist.is_for_from,
+                TestPlaylist.regions,
+                custom_wave,
+                pager,
+            )
+
+    return PlaylistFactory()
+
+
+@pytest.fixture(scope='session')
+def playlist(playlist_factory, playlist_without_nested_playlists):
+    return playlist_factory.get([playlist_without_nested_playlists], [playlist_without_nested_playlists])
+
+
+@pytest.fixture(scope='session')
+def playlist_without_nested_playlists(playlist_factory):
+    return playlist_factory.get([], [])
+
+
+@pytest.fixture(scope='session')
+def generated_playlist(playlist):
+    return GeneratedPlaylist(
+        TestGeneratedPlaylist.type,
+        TestGeneratedPlaylist.ready,
+        TestGeneratedPlaylist.notify,
+        playlist,
+        TestGeneratedPlaylist.description,
+        TestGeneratedPlaylist.preview_description,
+    )
+
+
+@pytest.fixture(scope='session')
+def client():
+    return Client()
+
+
+@pytest.fixture(scope='session')
+def device_code():
+    return DeviceCode(
+        TestDeviceCode.device_code,
+        TestDeviceCode.user_code,
+        TestDeviceCode.verification_url,
+        TestDeviceCode.expires_in,
+        TestDeviceCode.interval,
+    )
+
+
+@pytest.fixture(scope='session')
+def oauth_token():
+    return OAuthToken(
+        TestOAuthToken.access_token,
+        TestOAuthToken.refresh_token,
+        TestOAuthToken.expires_in,
+        TestOAuthToken.token_type,
+    )
+
+
+@pytest.fixture(scope='session')
+def tag():
+    return Tag(TestTag.id_, TestTag.value, TestTag.name, TestTag.og_description, TestTag.og_image)
+
+
+@pytest.fixture(scope='session')
+def brand():
+    return Brand(
+        TestBrand.image,
+        TestBrand.background,
+        TestBrand.reference,
+        TestBrand.pixels,
+        TestBrand.theme,
+        TestBrand.playlist_theme,
+        TestBrand.button,
+    )
+
+
+@pytest.fixture(scope='session')
+def track_with_ads(track):
+    return TrackWithAds(TestTrackWithAds.type, track)
+
+
+@pytest.fixture(scope='session')
+def day(event, track_with_ads, track):
+    return Day(TestDay.day, [event], [track_with_ads], [track])
+
+
+@pytest.fixture(scope='session')
+def track_short():
+    return TrackShort(TestTrackShort.id, TestTrackShort.timestamp, TestTrackShort.album_id)
+
+
+@pytest.fixture(scope='session')
+def track_short_old(track_id):
+    return TrackShortOld(track_id, TestTrackShortOld.timestamp)
+
+
+@pytest.fixture(scope='session')
+def video():
+    return Video(
+        TestVideo.title,
+        TestVideo.cover,
+        TestVideo.embed_url,
+        TestVideo.provider,
+        TestVideo.provider_video_id,
+        TestVideo.youtube_url,
+        TestVideo.thumbnail_url,
+        TestVideo.duration,
+        TestVideo.text,
+        TestVideo.html_auto_play_video_player,
+        TestVideo.regions,
+    )
+
+
+@pytest.fixture(scope='session')
+def vinyl():
+    return Vinyl(
+        TestVinyl.url,
+        TestVinyl.title,
+        TestVinyl.year,
+        TestVinyl.price,
+        TestVinyl.media,
+        TestVinyl.offer_id,
+        TestVinyl.artist_ids,
+        TestVinyl.picture,
+    )
+
+
+@pytest.fixture(scope='session')
+def play_context(track_short_old):
+    return PlayContext(
+        TestPlayContext.client_, TestPlayContext.context, TestPlayContext.context_item, [track_short_old]
+    )
+
+
+@pytest.fixture(scope='session')
+def play_contexts_data(track_short_old):
+    return PlayContextsData([track_short_old])
+
+
+@pytest.fixture(scope='session')
+def enum(value):
+    return Enum(TestEnum.type, TestEnum.name, [value])
+
+
+@pytest.fixture(scope='session')
+def icon():
+    return Icon(TestIcon.background_color, TestIcon.image_url)
+
+
+@pytest.fixture(scope='session')
+def content_restrictions():
+    return ContentRestrictions(
+        TestContentRestrictions.available,
+        TestContentRestrictions.disclaimers,
+    )
+
+
+@pytest.fixture(scope='session')
+def cover_derived_colors():
+    return CoverDerivedColors(
+        TestCoverDerivedColors.average,
+        TestCoverDerivedColors.wave_text,
+        TestCoverDerivedColors.mini_player,
+        TestCoverDerivedColors.accent,
+    )
+
+
+@pytest.fixture(scope='session')
+def cover(cover_derived_colors):
+    return Cover(
+        TestCover.type,
+        TestCover.uri,
+        TestCover.items_uri,
+        TestCover.dir,
+        TestCover.version,
+        TestCover.custom,
+        TestCover.is_custom,
+        TestCover.copyright_name,
+        TestCover.copyright_cline,
+        TestCover.prefix,
+        TestCover.error,
+        TestCover.color,
+        cover_derived_colors,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_min_price():
+    return ConcertMinPrice(
+        TestConcertMinPrice.value,
+        TestConcertMinPrice.currency,
+        TestConcertMinPrice.currency_symbol,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_cashback():
+    return ConcertCashback(
+        TestConcertCashback.title,
+        TestConcertCashback.value_percent,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_event_info():
+    return ConcertEventInfo(
+        TestConcertEventInfo.type,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert(concert_min_price, concert_cashback, concert_event_info, cover):
+    return Concert(
+        TestConcert.id,
+        TestConcert.images,
+        TestConcert.image_url,
+        TestConcert.concert_title,
+        TestConcert.afisha_url,
+        TestConcert.city,
+        TestConcert.place,
+        TestConcert.address,
+        TestConcert.datetime,
+        TestConcert.content_rating,
+        concert_min_price,
+        concert_cashback,
+        concert_event_info,
+        cover,
+        TestConcert.data_session_id,
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_concerts(concert):
+    return ArtistConcerts(
+        TestArtistConcerts.artist_title,
+        [concert],
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_description():
+    return ConcertDescription(
+        TestConcertDescription.text,
+        TestConcertDescription.source,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_location():
+    return ConcertLocation(
+        TestConcertLocation.id,
+        TestConcertLocation.name,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_locations(concert_location):
+    return ConcertLocations(
+        [concert_location],
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_tab_range():
+    return ConcertTabRange(
+        TestConcertTabRange.offset,
+        TestConcertTabRange.limit,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_tab_config_data(concert_tab_range):
+    return ConcertTabConfigData(
+        concert_tab_range,
+        concert_tab_range,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_tab_config(concert_tab_config_data):
+    return ConcertTabConfig(
+        concert_tab_config_data,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_feed_item_data(concert, concert_min_price):
+    return ConcertFeedItemData(
+        concert,
+        concert_min_price,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_feed_item(concert_feed_item_data):
+    return ConcertFeedItem(
+        TestConcertFeedItem.type,
+        concert_feed_item_data,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_feed(concert_feed_item):
+    return ConcertFeed(
+        [concert_feed_item],
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_info(concert, concert_min_price, cover, concert_description):
+    return ConcertInfo(
+        concert,
+        concert_min_price,
+        [cover],
+        concert_description,
+        TestConcertInfo.lead_artist_id,
+    )
+
+
+@pytest.fixture(scope='session')
+def concert_skeleton(skeleton_block):
+    return ConcertSkeleton(
+        TestConcertSkeleton.id,
+        TestConcertSkeleton.title,
+        [skeleton_block],
+    )
+
+
+@pytest.fixture(scope='session')
+def open_graph_data(cover):
+    return OpenGraphData(TestOpenGraphData.title, TestOpenGraphData.description, cover)
+
+
+@pytest.fixture(scope='session')
+def meta_data():
+    return MetaData(
+        TestMetaData.album,
+        TestMetaData.volume,
+        TestMetaData.year,
+        TestMetaData.number,
+        TestMetaData.genre,
+        TestMetaData.lyricist,
+        TestMetaData.version,
+        TestMetaData.composer,
+    )
+
+
+@pytest.fixture(scope='session')
+def licence_text_part():
+    return LicenceTextPart(TestLicenceTextPart.text, TestLicenceTextPart.url)
+
+
+@pytest.fixture(scope='session')
+def link():
+    return Link(TestLink.title, TestLink.href, TestLink.type, TestLink.social_network)
+
+
+@pytest.fixture(scope='session')
+def invocation_info():
+    return InvocationInfo(
+        TestInvocationInfo.hostname, TestInvocationInfo.req_id, TestInvocationInfo.exec_duration_millis
+    )
+
+
+@pytest.fixture(scope='session')
+def settings(product, price):
+    return Settings([product], [product], TestSettings.web_payment_url, TestSettings.promo_codes_enabled, price)
+
+
+@pytest.fixture(scope='session')
+def counts():
+    return Counts(TestCounts.tracks, TestCounts.direct_albums, TestCounts.also_albums, TestCounts.also_tracks)
+
+
+@pytest.fixture(scope='session')
+def description():
+    return Description(TestDescription.text, TestDescription.uri)
+
+
+@pytest.fixture(scope='session')
+def deprecation():
+    return Deprecation(TestDeprecation.target_album_id, TestDeprecation.status, TestDeprecation.done)
+
+
+@pytest.fixture(scope='session')
+def pager():
+    return Pager(TestPager.total, TestPager.page, TestPager.per_page)
+
+
+@pytest.fixture(scope='session')
+def clip(artist, cover, content_restrictions):
+    return Clip(
+        clip_id=TestClip.clip_id,
+        title=TestClip.title,
+        version=TestClip.version,
+        player_id=TestClip.player_id,
+        uuid=TestClip.uuid,
+        thumbnail=TestClip.thumbnail,
+        preview_url=TestClip.preview_url,
+        duration=TestClip.duration,
+        track_ids=TestClip.track_ids,
+        artists=[artist],
+        disclaimers=TestClip.disclaimers,
+        explicit=TestClip.explicit,
+        cover=cover,
+        content_restrictions=content_restrictions,
+    )
+
+
+@pytest.fixture(scope='session')
+def clips_will_like(clip, pager):
+    return ClipsWillLike(
+        clips=[clip],
+        pager=pager,
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_event(artist, track):
+    return ArtistEvent(artist, [track], [artist], TestArtistEvent.subscribed)
+
+
+@pytest.fixture(scope='session')
+def album_event(album, track):
+    return AlbumEvent(album, [track])
+
+
+@pytest.fixture(scope='session')
+def video_supplement():
+    return VideoSupplement(
+        TestVideoSupplement.cover,
+        TestVideoSupplement.provider,
+        TestVideoSupplement.title,
+        TestVideoSupplement.provider_video_id,
+        TestVideoSupplement.url,
+        TestVideoSupplement.embed_url,
+        TestVideoSupplement.embed,
+    )
+
+
+@pytest.fixture(scope='session')
+def ratings():
+    return Ratings(TestRatings.month, TestRatings.week, TestRatings.day)
+
+
+@pytest.fixture(scope='session')
+def made_for(user, case_forms):
+    return MadeFor(user, case_forms)
+
+
+@pytest.fixture(scope='session')
+def play_counter():
+    return PlayCounter(TestPlayCounter.value, TestPlayCounter.description, TestPlayCounter.updated)
+
+
+@pytest.fixture(scope='session')
+def playlist_absence():
+    return PlaylistAbsence(TestPlaylistAbsence.kind, TestPlaylistAbsence.reason)
+
+
+@pytest.fixture(scope='session')
+def context():
+    return Context(TestContext.type_, TestContext.id_, TestContext.description)
+
+
+@pytest.fixture(scope='session')
+def case_forms():
+    return CaseForms(
+        TestCaseForms.nominative,
+        TestCaseForms.genitive,
+        TestCaseForms.dative,
+        TestCaseForms.accusative,
+        TestCaseForms.instrumental,
+        TestCaseForms.prepositional,
+    )
+
+
+@pytest.fixture(scope='session')
+def lyrics():
+    return Lyrics(
+        TestLyrics.id,
+        TestLyrics.lyrics,
+        TestLyrics.full_lyrics,
+        TestLyrics.has_rights,
+        TestLyrics.show_translation,
+        TestLyrics.text_language,
+        TestLyrics.url,
+    )
+
+
+@pytest.fixture(scope='session')
+def poetry_lover_match():
+    return PoetryLoverMatch(TestPoetryLoverMatch.begin, TestPoetryLoverMatch.end, TestPoetryLoverMatch.line)
+
+
+@pytest.fixture(scope='session')
+def images():
+    return Images(TestImages._208x208, TestImages._300x300)
+
+
+@pytest.fixture(scope='session')
+def normalization():
+    return Normalization(TestNormalization.gain, TestNormalization.peak)
+
+
+@pytest.fixture(scope='session')
+def mix_link():
+    return MixLink(
+        TestMixLink.title,
+        TestMixLink.url,
+        TestMixLink.url_scheme,
+        TestMixLink.text_color,
+        TestMixLink.background_color,
+        TestMixLink.background_image_uri,
+        TestMixLink.cover_white,
+        TestMixLink.cover_uri,
+    )
+
+
+@pytest.fixture(scope='session')
+def title():
+    return Title(TestTitle.title, TestTitle.full_title)
+
+
+@pytest.fixture(scope='session')
+def personal_playlists_data():
+    return PersonalPlaylistsData(TestPersonalPlaylistsData.is_wizard_passed)
+
+
+@pytest.fixture(scope='session')
+def promotion():
+    return Promotion(
+        TestPromotion.promo_id,
+        TestPromotion.title,
+        TestPromotion.subtitle,
+        TestPromotion.heading,
+        TestPromotion.url,
+        TestPromotion.url_scheme,
+        TestPromotion.text_color,
+        TestPromotion.gradient,
+        TestPromotion.image,
+    )
+
+
+@pytest.fixture(scope='session')
+def discrete_scale(value):
+    return DiscreteScale(TestDiscreteScale.type, TestDiscreteScale.name, value, value)
+
+
+@pytest.fixture(scope='session')
+def major():
+    return Major(TestMajor.id, TestMajor.name)
+
+
+@pytest.fixture(scope='session')
+def permissions():
+    return Permissions(TestPermissions.until, TestPermissions.values, TestPermissions.default)
+
+
+@pytest.fixture(scope='session')
+def auto_renewable(product, user):
+    return AutoRenewable(
+        TestAutoRenewable.expires,
+        TestAutoRenewable.vendor,
+        TestAutoRenewable.vendor_help_url,
+        product,
+        TestAutoRenewable.finished,
+        user,
+        TestAutoRenewable.product_id,
+        TestAutoRenewable.order_id,
+    )
+
+
+@pytest.fixture(scope='session')
+def passport_phone():
+    return PassportPhone(TestPassportPhone.phone)
+
+
+@pytest.fixture(scope='session')
+def renewable_remainder():
+    return RenewableRemainder(TestRenewableRemainder.days)
+
+
+@pytest.fixture(scope='session')
+def user():
+    return User(
+        TestUser.uid,
+        TestUser.login,
+        TestUser.name,
+        TestUser.display_name,
+        TestUser.full_name,
+        TestUser.sex,
+        TestUser.verified,
+        TestUser.regions,
+    )
+
+
+@pytest.fixture(scope='session')
+def account(passport_phone):
+    return Account(
+        TestAccount.now,
+        TestAccount.service_available,
+        TestAccount.region,
+        TestAccount.uid,
+        TestAccount.login,
+        TestAccount.full_name,
+        TestAccount.second_name,
+        TestAccount.first_name,
+        TestAccount.display_name,
+        TestAccount.hosted_user,
+        TestAccount.birthday,
+        [passport_phone],
+        TestAccount.registered_at,
+        TestAccount.has_info_for_app_metrica,
+        TestAccount.child,
+    )
+
+
+@pytest.fixture(scope='session')
+def plus():
+    return Plus(TestPlus.has_plus, TestPlus.is_tutorial_completed)
+
+
+@pytest.fixture(scope='session')
+def price():
+    return Price(TestPrice.amount, TestPrice.currency)
+
+
+@pytest.fixture(scope='session')
+def subscription(renewable_remainder, auto_renewable, operator, non_auto_renewable):
+    return Subscription(
+        renewable_remainder,
+        [auto_renewable],
+        [auto_renewable],
+        TestSubscription.had_any_subscription,
+        [operator],
+        non_auto_renewable,
+        TestSubscription.can_start_trial,
+        TestSubscription.mcdonalds,
+        TestSubscription.end,
+    )
+
+
+@pytest.fixture(scope='session')
+def non_auto_renewable():
+    return NonAutoRenewable(TestNonAutoRenewable.start, TestNonAutoRenewable.end)
+
+
+@pytest.fixture(scope='session')
+def deactivation():
+    return Deactivation(TestDeactivation.method, TestDeactivation.instructions)
+
+
+@pytest.fixture(scope='session')
+def operator(deactivation):
+    return Operator(
+        TestOperator.product_id,
+        TestOperator.phone,
+        TestOperator.payment_regularity,
+        [deactivation],
+        TestOperator.title,
+        TestOperator.suspended,
+    )
+
+
+@pytest.fixture(scope='session')
+def rotor_settings():
+    return RotorSettings(
+        TestRotorSettings.language,
+        TestRotorSettings.diversity,
+        TestRotorSettings.mood,
+        TestRotorSettings.energy,
+        TestRotorSettings.mood_energy,
+    )
+
+
+@pytest.fixture(scope='session')
+def product(price, licence_text_part):
+    return Product(
+        TestProduct.product_id,
+        TestProduct.type,
+        TestProduct.duration,
+        TestProduct.trial_duration,
+        TestProduct.feature,
+        TestProduct.debug,
+        TestProduct.plus,
+        price,
+        TestProduct.common_period_duration,
+        TestProduct.cheapest,
+        TestProduct.title,
+        TestProduct.family_sub,
+        TestProduct.fb_image,
+        TestProduct.fb_name,
+        TestProduct.family,
+        TestProduct.features,
+        TestProduct.description,
+        TestProduct.available,
+        TestProduct.trial_available,
+        TestProduct.trial_period_duration,
+        TestProduct.intro_period_duration,
+        price,
+        TestProduct.start_period_duration,
+        price,
+        [licence_text_part],
+        TestProduct.vendor_trial_available,
+        TestProduct.button_text,
+        TestProduct.button_additional_text,
+        TestProduct.payment_method_types,
+    )
+
+
+@pytest.fixture(scope='session')
+def playlist_id():
+    return PlaylistId(TestPlaylistId.uid, TestPlaylistId.kind)
+
+
+@pytest.fixture(scope='session')
+def contest():
+    return Contest(
+        TestContest.contest_id, TestContest.status, TestContest.can_edit, TestContest.sent, TestContest.withdrawn
+    )
+
+
+@pytest.fixture(scope='session', params=[True, False])
+def label(request, link):
+    if request.param:
+        return Label(
+            TestLabel.id,
+            TestLabel.name,
+            TestLabel.description,
+            TestLabel.description_formatted,
+            TestLabel.image,
+            [link],
+            TestLabel.type,
+        )
+
+    return TestLabel.another_representation_of_label
+
+
+@pytest.fixture(scope='session')
+def track_position():
+    return TrackPosition(TestTrackPosition.volume, TestTrackPosition.index)
+
+
+@pytest.fixture(scope='session')
+def status(account, permissions, subscription, plus, station_data, alert):
+    return Status(
+        account,
+        permissions,
+        TestStatus.advertisement,
+        subscription,
+        TestStatus.cache_limit,
+        TestStatus.subeditor,
+        TestStatus.subeditor_level,
+        plus,
+        TestStatus.default_email,
+        TestStatus.skips_per_hour,
+        TestStatus.station_exists,
+        station_data,
+        alert,
+        TestStatus.premium_region,
+        TestStatus.experiment,
+        TestStatus.pretrial_active,
+        TestStatus.userhash,
+    )
+
+
+@pytest.fixture(scope='session')
+def station_data():
+    return StationData(TestStationData.name)
+
+
+@pytest.fixture(scope='session')
+def alert_button():
+    return AlertButton(TestAlertButton.text, TestAlertButton.bg_color, TestAlertButton.text_color, TestAlertButton.uri)
+
+
+@pytest.fixture(scope='session')
+def alert(alert_button):
+    return Alert(
+        TestAlert.alert_id,
+        TestAlert.text,
+        TestAlert.bg_color,
+        TestAlert.text_color,
+        TestAlert.alert_type,
+        alert_button,
+        TestAlert.close_button,
+    )
+
+
+@pytest.fixture(scope='session')
+def chart(track_id):
+    return Chart(
+        TestChart.position, TestChart.progress, TestChart.listeners, TestChart.shift, TestChart.bg_color, track_id
+    )
+
+
+@pytest.fixture(scope='session')
+def event(track, artist_event, album_event):
+    return Event(
+        TestEvent.id,
+        TestEvent.type,
+        TestEvent.type_for_from,
+        TestEvent.title,
+        [track],
+        [artist_event],
+        [album_event],
+        TestEvent.message,
+        TestEvent.device,
+        TestEvent.tracks_count,
+        TestEvent.genre,
+    )
+
+
+@pytest.fixture(scope='session')
+def chart_info_menu_item():
+    return ChartInfoMenuItem(TestChartInfoMenuItem.title, TestChartInfoMenuItem.url, TestChartInfoMenuItem.selected)
+
+
+@pytest.fixture(scope='session')
+def chart_info_menu(chart_info_menu_item):
+    return ChartInfoMenu([chart_info_menu_item])
+
+
+@pytest.fixture(scope='session')
+def chart_info(playlist, chart_info_menu):
+    return ChartInfo(
+        TestChartInfo.id,
+        TestChartInfo.type,
+        TestChartInfo.type_for_from,
+        TestChartInfo.title,
+        chart_info_menu,
+        playlist,
+        TestChartInfo.chart_description,
+    )
+
+
+@pytest.fixture(scope='session')
+def track_id():
+    return TrackId(TestTrackId.id, TestTrackId.track_id, TestTrackId.album_id, TestTrackId.from_)
+
+
+@pytest.fixture(scope='session')
+def value():
+    return Value(TestValue.value, TestValue.name)
+
+
+@pytest.fixture(scope='session')
+def id_():
+    return Id(TestId.type, TestId.tag)
+
+
+@pytest.fixture(scope='session')
+def sequence(track):
+    return Sequence(TestSequence.type, track, TestSequence.liked)
+
+
+@pytest.fixture(scope='session')
+def station(id_, icon, restrictions):
+    return Station(
+        id_,
+        TestStation.name,
+        icon,
+        icon,
+        icon,
+        TestStation.id_for_from,
+        restrictions,
+        restrictions,
+        TestStation.full_image_url,
+        TestStation.mts_full_image_url,
+        id_,
+    )
+
+
+@pytest.fixture(scope='session')
+def shot_type():
+    return ShotType(TestShotType.id, TestShotType.title)
+
+
+@pytest.fixture(scope='session')
+def shot_data(shot_type):
+    return ShotData(TestShotData.cover_uri, TestShotData.mds_url, TestShotData.shot_text, shot_type)
+
+
+@pytest.fixture(scope='session')
+def shot(shot_data):
+    return Shot(TestShot.order, TestShot.played, shot_data, TestShot.shot_id, TestShot.status)
+
+
+@pytest.fixture(scope='session')
+def chart_item(track, chart):
+    return ChartItem(track, chart)
+
+
+@pytest.fixture(scope='session')
+def station_result(station, rotor_settings, ad_params):
+    return StationResult(
+        station,
+        rotor_settings,
+        rotor_settings,
+        ad_params,
+        TestStationResult.explanation,
+        TestStationResult.prerolls,
+        TestStationResult.rup_title,
+        TestStationResult.rup_description,
+        TestStationResult.custom_name,
+    )
+
+
+@pytest.fixture(scope='session')
+def ad_params():
+    return AdParams(
+        TestAdParams.partner_id,
+        TestAdParams.category_id,
+        TestAdParams.page_ref,
+        TestAdParams.target_ref,
+        TestAdParams.other_params,
+        TestAdParams.ad_volume,
+        TestAdParams.genre_id,
+        TestAdParams.genre_name,
+    )
+
+
+@pytest.fixture(scope='session')
+def restrictions(enum, discrete_scale):
+    return Restrictions(enum, enum, discrete_scale, discrete_scale, enum)
+
+
+@pytest.fixture(scope='session')
+def results(
+    track,
+    artist,
+    album,
+    playlist,
+    video,
+    generated_playlist,
+    promotion,
+    chart_item,
+    play_context,
+    mix_link,
+    personal_playlists_data,
+    play_contexts_data,
+    user,
+):
+    return {
+        1: track,
+        2: artist,
+        3: album,
+        4: playlist,
+        5: video,
+        6: generated_playlist,
+        7: promotion,
+        8: chart_item,
+        9: play_context,
+        10: mix_link,
+        11: personal_playlists_data,
+        12: play_contexts_data,
+        13: user,
+        14: album,
+        15: track,
+    }
+
+
+@pytest.fixture(scope='session')
+def types():
+    return {
+        1: 'track',
+        2: 'artist',
+        3: 'album',
+        4: 'playlist',
+        5: 'video',
+        6: 'personal-playlist',
+        7: 'promotion',
+        8: 'chart-item',
+        9: 'play-context',
+        10: 'mix-link',
+        11: 'personal-playlists',
+        12: 'play-contexts',
+        13: 'user',
+        14: 'podcast',
+        15: 'podcast_episode',
+    }
+
+
+@pytest.fixture(scope='session', params=[1, 2, 3, 4, 5, 13, 14, 15])
+def result_with_type(request, results, types):
+    return results[request.param], types[request.param]
+
+
+@pytest.fixture(scope='session', params=[1, 2, 3, 4, 5, 13, 14, 15])
+def best(request, results, types):
+    return Best(types[request.param], results[request.param], TestBest.text)
+
+
+@pytest.fixture(scope='session', params=[1, 2, 3, 4, 5, 13, 14, 15])
+def best_with_result(request, results, types):
+    return Best(types[request.param], results[request.param], TestBest.text), results[request.param]
+
+
+@pytest.fixture(scope='session', params=[3, 4, 6, 7, 8, 9, 10])
+def block_entity(request, results, types):
+    return BlockEntity(TestBlockEntity.id, types[request.param], results[request.param])
+
+
+@pytest.fixture(scope='session')
+def block(block_entity, data_with_type):
+    data, type_ = data_with_type
+
+    return Block(
+        TestBlock.id, type_, TestBlock.type_for_from, TestBlock.title, [block_entity], TestBlock.description, data
+    )
+
+
+@pytest.fixture(scope='session', params=[11, 12])
+def data(request, results):
+    return results[request.param]
+
+
+@pytest.fixture(scope='session', params=[11, 12])
+def data_with_type(request, results, types):
+    return results[request.param], types[request.param]
+
+
+@pytest.fixture(scope='session', params=[1, 2, 3, 4, 5])
+def search_result_with_results_and_type(request, types, results):
+    return (
+        SearchResult(
+            types[request.param],
+            TestSearchResult.total,
+            TestSearchResult.per_page,
+            TestSearchResult.order,
+            [results[request.param]],
+        ),
+        [results[request.param]],
+        types[request.param],
+    )
+
+
+@pytest.fixture(scope='session')
+def custom_wave():
+    return CustomWave(TestCustomWave.title, TestCustomWave.animation_url, TestCustomWave.position)
+
+
+@pytest.fixture(scope='session')
+def r_128():
+    return R128(TestR128.i, TestR128.tp)
+
+
+@pytest.fixture(scope='session')
+def lyrics_info():
+    return LyricsInfo(TestLyricsInfo.has_available_sync_lyrics, TestLyricsInfo.has_available_text_lyrics)
+
+
+@pytest.fixture(scope='session')
+def stats():
+    return Stats(TestStats.last_month_listeners, TestStats.last_month_listeners_delta)
+
+
+@pytest.fixture(scope='session')
+def pin_data_artist(cover, content_restrictions):
+    return PinData(
+        id=TestPinData.id,
+        name=TestPinData.name,
+        cover=cover,
+        content_restrictions=content_restrictions,
+    )
+
+
+@pytest.fixture(scope='session')
+def pin_data_album(cover, content_restrictions):
+    return PinData(
+        id=TestPinData.id,
+        title=TestPinData.title,
+        cover=cover,
+        content_restrictions=content_restrictions,
+    )
+
+
+@pytest.fixture(scope='session')
+def pin_data_playlist(cover):
+    return PinData(
+        uid=TestPinData.uid,
+        kind=TestPinData.kind,
+        playlist_uuid=TestPinData.playlist_uuid,
+        title=TestPinData.title,
+        cover=cover,
+    )
+
+
+@pytest.fixture(scope='session')
+def pin_artist(pin_data_artist):
+    return Pin(type=TestPin.type_artist, data=pin_data_artist)
+
+
+@pytest.fixture(scope='session')
+def pin_album(pin_data_album):
+    return Pin(type=TestPin.type_album, data=pin_data_album)
+
+
+@pytest.fixture(scope='session')
+def pin_playlist(pin_data_playlist):
+    return Pin(type=TestPin.type_playlist, data=pin_data_playlist)
+
+
+@pytest.fixture(scope='session')
+def pins_list(pin_artist):
+    return PinsList(
+        pins=[pin_artist],
+    )
+
+
+@pytest.fixture(scope='session')
+def presaves(album):
+    return Presaves(
+        upcoming_albums=[album],
+        released_albums=[album],
+    )
+
+
+@pytest.fixture(scope='session')
+def wave():
+    return Wave(
+        name=TestWave.name,
+        description=TestWave.description,
+        seeds=TestWave.seeds,
+    )
+
+
+@pytest.fixture(scope='session')
+def wave_agent_entity():
+    return WaveAgentEntity(type=TestWaveAgentEntity.type)
+
+
+@pytest.fixture(scope='session')
+def wave_agent(cover, wave_agent_entity):
+    return WaveAgent(
+        animation_uri=TestWaveAgent.animation_uri,
+        cover=cover,
+        entity=wave_agent_entity,
+    )
+
+
+@pytest.fixture(scope='session')
+def similar_entity_data(wave, wave_agent):
+    return SimilarEntityData(wave=wave, agent=wave_agent)
+
+
+@pytest.fixture(scope='session')
+def similar_entity_item(similar_entity_data):
+    return SimilarEntityItem(
+        type=TestSimilarEntityItem.type,
+        data=similar_entity_data,
+    )
+
+
+@pytest.fixture(scope='session')
+def album_similar_entities(similar_entity_item):
+    return AlbumSimilarEntities(
+        items=[similar_entity_item],
+    )
+
+
+@pytest.fixture(scope='session')
+def trailer_info(track):
+    return TrailerInfo(
+        title=TestTrailerInfo.title,
+        tracks=[track],
+    )
+
+
+@pytest.fixture(scope='session')
+def album_trailer(album, artist, trailer_info):
+    return AlbumTrailer(
+        album=album,
+        artists=[artist],
+        trailer=trailer_info,
+    )
+
+
+@pytest.fixture(scope='session')
+def foreign_agent():
+    return ForeignAgent(
+        reason=TestForeignAgent.reason,
+        title=TestForeignAgent.title,
+    )
+
+
+@pytest.fixture(scope='session')
+def disclaimer(foreign_agent):
+    return Disclaimer(
+        foreign_agent=foreign_agent,
+    )
+
+
+@pytest.fixture(scope='session')
+def experiment_detail_value():
+    value = ExperimentDetailValue(title=TestExperimentDetailValue.title)
+    value.__dict__['enabled'] = TestExperimentDetailValue.enabled
+    value.__dict__['delay'] = TestExperimentDetailValue.delay
+    return value
+
+
+@pytest.fixture(scope='session')
+def experiment_detail(experiment_detail_value):
+    return ExperimentDetail(group=TestExperimentDetail.group, value=experiment_detail_value)
+
+
+@pytest.fixture(scope='session')
+def experiments_details(experiment_detail):
+    return ExperimentsDetails(experiments={'TestExperiment': experiment_detail})
+
+
+@pytest.fixture(scope='session')
+def fade():
+    return Fade(
+        in_start=TestFade.in_start,
+        in_stop=TestFade.in_stop,
+        out_start=TestFade.out_start,
+        out_stop=TestFade.out_stop,
+    )
+
+
+@pytest.fixture(scope='session')
+def smart_preview_params(fade):
+    return SmartPreviewParams(
+        duration_ms=TestSmartPreviewParams.duration_ms,
+        fade=fade,
+    )
+
+
+@pytest.fixture(scope='session')
+def credit():
+    return Credit(
+        title=TestCredit.title,
+        value=TestCredit.value,
+    )
+
+
+@pytest.fixture(scope='session')
+def credits_(credit):
+    return Credits(
+        credits=[credit],
+    )
+
+
+@pytest.fixture(scope='session')
+def track_trailer(track):
+    return TrackTrailer(
+        title=TestTrackTrailer.title,
+        track=track,
+    )
+
+
+@pytest.fixture(scope='session')
+def track_full_info(track, artist):
+    return TrackFullInfo(
+        track=track,
+        similar_tracks=[track],
+        also_in_albums=[track],
+        aliases=TestTrackFullInfo.aliases,
+        artists=[artist],
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_link():
+    return ArtistLink(TestArtistLink.title, TestArtistLink.subtitle, TestArtistLink.url, TestArtistLink.img_url)
+
+
+@pytest.fixture(scope='session')
+def artist_links_fixture(artist_link):
+    return ArtistLinks(
+        links=[artist_link],
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_similar(artist):
+    return ArtistSimilar(
+        artist=artist,
+        similar_artists=[artist],
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history_item_id():
+    return MusicHistoryItemId(
+        id=TestMusicHistoryItemId.id,
+        track_id=TestMusicHistoryItemId.track_id,
+        album_id=TestMusicHistoryItemId.album_id,
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history_context_full_model_album(album_without_tracks, artist):
+    return MusicHistoryContextFullModel(
+        album=album_without_tracks,
+        artists=[artist],
+        available=TestMusicHistoryContextFullModel.available,
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history_context_full_model_artist(artist):
+    return MusicHistoryContextFullModel(
+        artist=artist,
+        available=TestMusicHistoryContextFullModel.available,
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history_item_data_track(music_history_item_id, track):
+    return MusicHistoryItemData(
+        item_id=music_history_item_id,
+        full_model=track,
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history_item_data_context(music_history_item_id, music_history_context_full_model_album):
+    return MusicHistoryItemData(
+        item_id=music_history_item_id,
+        full_model=music_history_context_full_model_album,
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history_item_track(music_history_item_data_track):
+    return MusicHistoryItem(
+        type=TestMusicHistoryItem.type_track,
+        data=music_history_item_data_track,
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history_item_album(music_history_item_data_context):
+    return MusicHistoryItem(
+        type=TestMusicHistoryItem.type_album,
+        data=music_history_item_data_context,
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history_group(music_history_item_album, music_history_item_track):
+    return MusicHistoryGroup(
+        context=music_history_item_album,
+        tracks=[music_history_item_track],
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history_tab(music_history_group):
+    return MusicHistoryTab(
+        date=TestMusicHistoryTab.date,
+        items=[music_history_group],
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history(music_history_tab):
+    return MusicHistory(
+        history_tabs=[music_history_tab],
+    )
+
+
+@pytest.fixture(scope='session')
+def music_history_items(music_history_item_track):
+    return MusicHistoryItems(
+        items=[music_history_item_track],
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_trailer_status():
+    return ArtistTrailerStatus(
+        available=TestArtistTrailerStatus.available,
+    )
+
+
+@pytest.fixture(scope='session')
+def about_artist(artist, stats, artist_link, cover):
+    return ArtistAbout(
+        artist=artist,
+        stats=stats,
+        description=TestArtistAbout.description,
+        links=[artist_link],
+        covers=[cover],
+        artist_type=TestArtistAbout.artist_type,
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_clip_data(clip, artist):
+    return ArtistClipData(
+        clip=clip,
+        artists=[artist],
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_clip_item(artist_clip_data):
+    return ArtistClipItem(
+        type=TestArtistClipItem.type,
+        data=artist_clip_data,
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_clips(artist_clip_item, pager):
+    return ArtistClips(
+        items=[artist_clip_item],
+        pager=pager,
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_info(artist, stats, artist_trailer_status, cover):
+    return ArtistInfo(
+        artist=artist,
+        likes_count=TestArtistInfo.likes_count,
+        stats=stats,
+        trailer=artist_trailer_status,
+        covers=[cover],
+        description=TestArtistInfo.description,
+        artist_type=TestArtistInfo.artist_type,
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_trailer(artist, trailer_info):
+    return ArtistTrailer(
+        artist=artist,
+        trailer=trailer_info,
+    )
+
+
+@pytest.fixture(scope='session')
+def skeleton_source():
+    return SkeletonSource(
+        uri=TestSkeletonSource.uri,
+        count_web=TestSkeletonSource.count_web,
+        count=TestSkeletonSource.count,
+    )
+
+
+@pytest.fixture(scope='session')
+def skeleton_view_all_action():
+    return SkeletonViewAllAction(
+        deeplink=TestSkeletonViewAllAction.deeplink,
+        weblink=TestSkeletonViewAllAction.weblink,
+    )
+
+
+@pytest.fixture(scope='session')
+def skeleton_block_data(skeleton_source, skeleton_view_all_action):
+    return SkeletonBlockData(
+        source=skeleton_source,
+        title=TestSkeletonBlockData.title,
+        show_policy=TestSkeletonBlockData.show_policy,
+        view_all_action=skeleton_view_all_action,
+    )
+
+
+@pytest.fixture(scope='session')
+def skeleton_block(skeleton_block_data):
+    return SkeletonBlock(
+        id=TestSkeletonBlock.id,
+        type=TestSkeletonBlock.type,
+        data=skeleton_block_data,
+    )
+
+
+@pytest.fixture(scope='session')
+def skeleton_tab(skeleton_block):
+    return SkeletonTab(
+        id=TestSkeletonTab.id,
+        title=TestSkeletonTab.title,
+        blocks=[skeleton_block],
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_skeleton(skeleton_block):
+    return ArtistSkeleton(
+        id=TestArtistSkeleton.id,
+        title=TestArtistSkeleton.title,
+        blocks=[skeleton_block],
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_donation_goal():
+    return ArtistDonationGoal(
+        title=TestArtistDonationGoal.title,
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_donation_data(artist, artist_donation_goal):
+    return ArtistDonationData(
+        tip_url=TestArtistDonationData.tip_url,
+        artist=artist,
+        goal=artist_donation_goal,
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_donation_item(artist_donation_data):
+    return ArtistDonationItem(
+        type=TestArtistDonationItem.type,
+        data=artist_donation_data,
+    )
+
+
+@pytest.fixture(scope='session')
+def artist_donations(artist_donation_item):
+    return ArtistDonations(
+        donations=[artist_donation_item],
+    )
+
+
+@pytest.fixture(scope='session')
+def playlist_availability():
+    return PlaylistAvailability(
+        available=TestPlaylistAvailability.available,
+    )
+
+
+@pytest.fixture(scope='session')
+def playlist_trailer(playlist, trailer_info):
+    return PlaylistTrailer(
+        playlist=playlist,
+        trailer=trailer_info,
+        shareable=TestPlaylistTrailer.shareable,
+    )
+
+
+@pytest.fixture(scope='session')
+def playlist_similar_entities(similar_entity_item):
+    return PlaylistSimilarEntities(
+        items=[similar_entity_item],
+    )
+
+
+@pytest.fixture(scope='session')
+def playlists_list(playlist):
+    return PlaylistsList(
+        playlists=[playlist],
+    )
+
+
+@pytest.fixture(scope='session')
+def metatag_title():
+    return MetatagTitle(title=TestMetatagTitle.title, full_title=TestMetatagTitle.full_title)
+
+
+@pytest.fixture(scope='session')
+def metatag_sort_by_value():
+    return MetatagSortByValue(
+        value=TestMetatagSortByValue.value,
+        title=TestMetatagSortByValue.title,
+        active=TestMetatagSortByValue.active,
+    )
+
+
+@pytest.fixture(scope='session')
+def metatag_leaf_nested():
+    return MetatagLeaf(tag='Спокойная музыка', title='Спокойное')
+
+
+@pytest.fixture(scope='session')
+def metatag_leaf(metatag_leaf_nested):
+    return MetatagLeaf(
+        tag=TestMetatagLeaf.tag,
+        title=TestMetatagLeaf.title,
+        leaves=[metatag_leaf_nested],
+    )
+
+
+@pytest.fixture(scope='session')
+def metatag_tree(metatag_leaf):
+    return MetatagTree(
+        title=TestMetatagTree.title,
+        navigation_id=TestMetatagTree.navigation_id,
+        leaves=[metatag_leaf],
+    )
+
+
+@pytest.fixture(scope='session')
+def metatags(metatag_tree):
+    return Metatags(trees=[metatag_tree])
+
+
+@pytest.fixture(scope='session')
+def metatag(metatag_title, artist, album, playlist, metatag_sort_by_value):
+    return Metatag(
+        id=TestMetatag.id,
+        cover_uri=TestMetatag.cover_uri,
+        color=TestMetatag.color,
+        title=metatag_title,
+        liked=TestMetatag.liked,
+        station_id=TestMetatag.station_id,
+        custom_wave_animation_url=TestMetatag.custom_wave_animation_url,
+        artists=[artist],
+        albums=[album],
+        playlists=[playlist],
+        tracks_sort_by_values=[metatag_sort_by_value],
+        albums_sort_by_values=[metatag_sort_by_value],
+        playlists_sort_by_values=[metatag_sort_by_value],
+    )
+
+
+@pytest.fixture(scope='session')
+def metatag_artist_entry(artist, track):
+    return MetatagArtistEntry(artist=artist, popular_tracks=[track])
+
+
+@pytest.fixture(scope='session')
+def metatag_artists(metatag_title, metatag_artist_entry, pager, metatag_sort_by_value):
+    return MetatagArtists(
+        id=TestMetatagArtists.id,
+        cover_uri=TestMetatagArtists.cover_uri,
+        color=TestMetatagArtists.color,
+        title=metatag_title,
+        station_id=TestMetatagArtists.station_id,
+        pager=pager,
+        artists=[metatag_artist_entry],
+        sort_by_values=[metatag_sort_by_value],
+    )
+
+
+@pytest.fixture(scope='session')
+def metatag_albums(metatag_title, album, pager, metatag_sort_by_value):
+    return MetatagAlbums(
+        id=TestMetatagAlbums.id,
+        cover_uri=TestMetatagAlbums.cover_uri,
+        color=TestMetatagAlbums.color,
+        title=metatag_title,
+        station_id=TestMetatagAlbums.station_id,
+        pager=pager,
+        albums=[album],
+        sort_by_values=[metatag_sort_by_value],
+    )
+
+
+@pytest.fixture(scope='session')
+def metatag_playlists(metatag_title, playlist, pager, metatag_sort_by_value):
+    return MetatagPlaylists(
+        id=TestMetatagPlaylists.id,
+        cover_uri=TestMetatagPlaylists.cover_uri,
+        color=TestMetatagPlaylists.color,
+        title=metatag_title,
+        station_id=TestMetatagPlaylists.station_id,
+        pager=pager,
+        playlists=[playlist],
+        sort_by_values=[metatag_sort_by_value],
+    )
