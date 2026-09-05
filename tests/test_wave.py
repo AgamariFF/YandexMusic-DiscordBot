@@ -903,8 +903,10 @@ class TestWaveSessionBatchIdProperty:
                 # Initial fetch with batch_id="original"
                 return WaveBatch(batch_id="original", tracks=(track_a, track_b))
             elif fetch_count["count"] == 2:
-                # Refresh gets different batch_id="refreshed"
-                return WaveBatch(batch_id="refreshed", tracks=())
+                # Обновление цепочки приносит НЕПУСТУЮ пачку с другим batch_id:
+                # именно она перезапишет _batch_id, и без фиксации
+                # _current_batch_id фидбек ушёл бы с чужим идентификатором.
+                return WaveBatch(batch_id="refreshed", tracks=(make_track("c"),))
             return WaveBatch(batch_id=None, tracks=())
 
         client = FakeMusicClient()
@@ -933,3 +935,32 @@ class TestWaveSessionBatchIdProperty:
             f"notify_track_skipped should use batch_id='original', "
             f"but got {skipped_calls[0][3]!r}"
         )
+
+
+class TestWaveSessionRetrySchedule:
+    """Паузы между попытками получить пачку треков."""
+
+    async def test_retry_delays_grow_and_do_not_trail(self, monkeypatch):
+        """Задержки экспоненциальные, и после последней попытки сна нет.
+
+        Лишний сон перед выбросом ошибки заставил бы пользователя ждать
+        ещё восемь секунд ради результата, который уже известен.
+        """
+        delays: list[float] = []
+
+        async def recording_sleep(seconds):
+            delays.append(seconds)
+
+        monkeypatch.setattr("bot.yandex.wave.asyncio.sleep", recording_sleep)
+
+        client = FakeMusicClient()
+        client.batches_to_return = []  # всегда пустая пачка
+        session = WaveSession(client)
+        await session.start()
+
+        with pytest.raises(WaveUnavailableError):
+            await session.next_track()
+
+        # 4 попытки → ровно 3 паузы, удваивающиеся, и ни одной после последней.
+        assert delays == [1.0, 2.0, 4.0]
+        assert len(delays) == WaveSession.MAX_FETCH_ATTEMPTS - 1
