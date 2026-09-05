@@ -19,10 +19,10 @@ class TestBassLevel:
     def test_gain_db_values(self):
         """gain_db property returns correct values."""
         assert BassLevel.OFF.gain_db == 0.0
-        assert BassLevel.LOW.gain_db == 4.0
-        assert BassLevel.MEDIUM.gain_db == 8.0
-        assert BassLevel.HIGH.gain_db == 12.0
-        assert BassLevel.EXTREME.gain_db == 18.0
+        assert BassLevel.LOW.gain_db == 6.0
+        assert BassLevel.MEDIUM.gain_db == 12.0
+        assert BassLevel.HIGH.gain_db == 18.0
+        assert BassLevel.EXTREME.gain_db == 30.0
 
     def test_gain_db_monotonic(self):
         """gain_db increases from OFF to EXTREME."""
@@ -89,17 +89,28 @@ class TestBuildAudioFilter:
             assert "bass=g=" in result
 
     def test_filter_contains_alimiter(self):
-        """Filter contains 'alimiter' (limiter to prevent clipping)."""
-        for level in [BassLevel.LOW, BassLevel.MEDIUM, BassLevel.HIGH, BassLevel.EXTREME]:
+        """Filter contains 'alimiter' (limiter to prevent clipping) for LOW/MEDIUM/HIGH."""
+        for level in [BassLevel.LOW, BassLevel.MEDIUM, BassLevel.HIGH]:
             result = build_audio_filter(level)
             assert "alimiter" in result
 
+    def test_filter_no_alimiter_at_extreme(self):
+        """Filter does NOT contain 'alimiter' at EXTREME: clipping is intentional.
+
+        At EXTREME, the limiter is intentionally disabled so bass clipping occurs
+        during s16le conversion, producing louder low frequencies. This is expected
+        behaviour, not a defect. If someone accidentally adds the limiter back,
+        this test will catch it.
+        """
+        result = build_audio_filter(BassLevel.EXTREME)
+        assert "alimiter" not in result
+
     def test_filter_contains_gain_value(self):
         """Filter contains correct gain values for each level."""
-        assert "bass=g=4" in build_audio_filter(BassLevel.LOW)
-        assert "bass=g=8" in build_audio_filter(BassLevel.MEDIUM)
-        assert "bass=g=12" in build_audio_filter(BassLevel.HIGH)
-        assert "bass=g=18" in build_audio_filter(BassLevel.EXTREME)
+        assert "bass=g=6" in build_audio_filter(BassLevel.LOW)
+        assert "bass=g=12" in build_audio_filter(BassLevel.MEDIUM)
+        assert "bass=g=18" in build_audio_filter(BassLevel.HIGH)
+        assert "bass=g=30" in build_audio_filter(BassLevel.EXTREME)
 
     def test_filter_format(self):
         """Filter format includes both bass and limiter."""
