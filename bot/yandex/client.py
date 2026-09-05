@@ -54,6 +54,7 @@ class YandexMusicClient:
         self._token = token
         self._station = station
         self._client: ClientAsync | None = None
+        self._feedback_warned = False
 
     @property
     def station(self) -> str:
@@ -107,7 +108,9 @@ class YandexMusicClient:
         всё равно получаются и воспроизводятся, поэтому неудача этого
         фидбека не считается фатальной и не прерывает запуск волны.
         Отсутствие подключения к клиенту — самостоятельная ошибка состояния
-        и по-прежнему приводит к `WaveUnavailableError`.
+        и по-прежнему приводит к `WaveUnavailableError`. Протухший токен
+        (`UnauthorizedError`) тоже остаётся фатальным: иначе пользователь
+        увидел бы «волна недоступна» и не узнал, что токен пора перевыпустить.
         """
         client = self._require_client()
         logger.info("Старт станции волны %s", self._station)
@@ -115,12 +118,15 @@ class YandexMusicClient:
             await client.rotor_station_feedback_radio_started(
                 self._station, from_, batch_id=batch_id
             )
-        except Exception as exc:
-            logger.warning(
-                "Не удалось отправить фидбек о старте станции волны: %s: %s",
+        except UnauthorizedError as exc:
+            logger.error(
+                "Токен Яндекса отклонён при старте станции волны: %s: %s",
                 type(exc).__name__,
                 exc,
             )
+            raise YandexAuthError() from exc
+        except Exception as exc:
+            self._log_feedback_failure("старт станции волны", exc)
 
     async def fetch_wave_batch(self, queue: str | int | None = None) -> WaveBatch:
         """Запрашивает очередную пачку треков волны."""
@@ -167,6 +173,25 @@ class YandexMusicClient:
         logger.info("Получена пачка треков волны: %d шт.", len(tracks))
         return WaveBatch(batch_id=result.batch_id, tracks=tuple(tracks))
 
+    def _log_feedback_failure(self, what: str, exc: Exception) -> None:
+        """Логирует неудачу фидбека: первую заметно, последующие — на DEBUG.
+
+        Сервер может отвергать фидбек постоянно (например, ошибкой
+        «condition is not met»), а фидбек уходит на каждый трек — warning
+        на каждый из них сделал бы лог непригодным для диагностики.
+        """
+        if self._feedback_warned:
+            logger.debug("Не удалось отправить фидбек (%s): %s: %s", what, type(exc).__name__, exc)
+            return
+        self._feedback_warned = True
+        logger.warning(
+            "Не удалось отправить фидбек (%s): %s: %s. "
+            "Воспроизведению это не мешает; дальнейшие неудачи фидбека — на уровне DEBUG",
+            what,
+            type(exc).__name__,
+            exc,
+        )
+
     async def notify_track_started(self, track_id: str, batch_id: str | None) -> None:
         """Сообщает API о начале воспроизведения трека."""
         try:
@@ -175,12 +200,7 @@ class YandexMusicClient:
                 self._station, track_id, batch_id=batch_id
             )
         except Exception as exc:
-            logger.warning(
-                "Не удалось отправить фидбек о старте трека %s: %s: %s",
-                track_id,
-                type(exc).__name__,
-                exc,
-            )
+            self._log_feedback_failure(f"старт трека {track_id}", exc)
 
     async def notify_track_finished(
         self, track_id: str, played_seconds: float, batch_id: str | None
@@ -192,12 +212,7 @@ class YandexMusicClient:
                 self._station, track_id, played_seconds, batch_id=batch_id
             )
         except Exception as exc:
-            logger.warning(
-                "Не удалось отправить фидбек о завершении трека %s: %s: %s",
-                track_id,
-                type(exc).__name__,
-                exc,
-            )
+            self._log_feedback_failure(f"завершение трека {track_id}", exc)
 
     async def notify_track_skipped(
         self, track_id: str, played_seconds: float, batch_id: str | None
@@ -209,12 +224,7 @@ class YandexMusicClient:
                 self._station, track_id, played_seconds, batch_id=batch_id
             )
         except Exception as exc:
-            logger.warning(
-                "Не удалось отправить фидбек о пропуске трека %s: %s: %s",
-                track_id,
-                type(exc).__name__,
-                exc,
-            )
+            self._log_feedback_failure(f"пропуск трека {track_id}", exc)
 
     async def resolve_stream_url(self, track: TrackInfo) -> str:
         """Возвращает прямую ссылку на аудиопоток лучшего доступного качества."""
@@ -261,27 +271,21 @@ class YandexMusicClient:
         try:
             return await best.get_direct_link_async()
         except UnauthorizedError as exc:
+            # Текст исключения может содержать подписанную ссылку — логируем только тип.
             logger.error(
-                "Не удалось получить прямую ссылку на трек %s: %s: %s",
-                track.id,
-                type(exc).__name__,
-                exc,
+                "Не удалось получить прямую ссылку на трек %s: %s", track.id, type(exc).__name__
             )
             raise YandexAuthError() from exc
         except YandexMusicError as exc:
+            # Текст исключения может содержать подписанную ссылку — логируем только тип.
             logger.warning(
-                "Не удалось получить прямую ссылку на трек %s: %s: %s",
-                track.id,
-                type(exc).__name__,
-                exc,
+                "Не удалось получить прямую ссылку на трек %s: %s", track.id, type(exc).__name__
             )
             raise TrackUnavailableError() from exc
         except OSError as exc:
+            # Текст исключения может содержать подписанную ссылку — логируем только тип.
             logger.warning(
-                "Не удалось получить прямую ссылку на трек %s: %s: %s",
-                track.id,
-                type(exc).__name__,
-                exc,
+                "Не удалось получить прямую ссылку на трек %s: %s", track.id, type(exc).__name__
             )
             raise TrackUnavailableError() from exc
 

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yandex_music.exceptions
 
-from bot.errors import TrackUnavailableError, WaveUnavailableError
+from bot.errors import TrackUnavailableError, WaveUnavailableError, YandexAuthError
 from bot.yandex.client import (
     WAVE_STATION_ID,
     TrackInfo,
@@ -395,7 +395,7 @@ class TestYandexMusicClientStartWave:
     async def test_start_wave_survives_feedback_rejection(self):
         """Server rejects feedback with BadRequestError, but wave still starts.
 
-        Regression test for boevoy bug: when Yandex API rejects the feedback
+        Regression test for a production bug: when the Yandex API rejects
         rotor_station_feedback_radio_started with BadRequestError (condition
         is not met), the wave is still playable, so start_wave() should NOT
         raise an exception—only log a warning. Wave functionality must not
@@ -411,6 +411,24 @@ class TestYandexMusicClientStartWave:
 
         # Should not raise despite BadRequestError from feedback
         await client.start_wave()
+
+    @pytest.mark.asyncio
+    async def test_start_wave_expired_token_still_raises_auth_error(self):
+        """An expired token stays fatal even though feedback failures are tolerated.
+
+        Otherwise the user would see "wave unavailable" and never learn that
+        the token must be reissued.
+        """
+        mock_client = AsyncMock()
+        mock_client.rotor_station_feedback_radio_started = AsyncMock(
+            side_effect=yandex_music.exceptions.UnauthorizedError("token expired")
+        )
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        with pytest.raises(YandexAuthError):
+            await client.start_wave()
 
     @pytest.mark.asyncio
     async def test_start_wave_survives_network_error(self):
