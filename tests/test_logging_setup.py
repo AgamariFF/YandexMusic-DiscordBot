@@ -1,5 +1,6 @@
 """Tests for bot.logging_setup module."""
 
+import io
 import logging
 import sys
 
@@ -243,6 +244,37 @@ class TestSetupLogging:
             assert has_secret_filter
         finally:
             # Restore
+            for handler in root_logger.handlers[:]:
+                root_logger.removeHandler(handler)
+            for handler in initial_handlers:
+                root_logger.addHandler(handler)
+            for filter_obj in root_logger.filters[:]:
+                root_logger.removeFilter(filter_obj)
+            for filter_obj in initial_filters:
+                root_logger.addFilter(filter_obj)
+
+    def test_console_survives_characters_outside_console_encoding(self, monkeypatch):
+        """Названия треков с эмодзи и иероглифами не ломают вывод в консоль.
+
+        На Windows консоль обычно в cp1251. Без защиты запись такого
+        названия падает с UnicodeEncodeError: сообщение теряется целиком,
+        а в консоль попадает трейсбек логгера вместо строки лога.
+        """
+        root_logger = logging.getLogger()
+        initial_handlers = list(root_logger.handlers)
+        initial_filters = list(root_logger.filters)
+        buffer = io.BytesIO()
+        console = io.TextIOWrapper(buffer, encoding="cp1251")
+        monkeypatch.setattr(sys, "stdout", console)
+
+        try:
+            setup_logging(level="INFO", secrets=[], log_file=None)
+            logging.getLogger("bot.test").info("Играет трек: %s", "Ϯ beatles 日本語 🎵")
+            console.flush()
+
+            assert buffer.getvalue(), "сообщение должно быть записано, а не потеряно"
+            assert b"beatles" in buffer.getvalue()
+        finally:
             for handler in root_logger.handlers[:]:
                 root_logger.removeHandler(handler)
             for handler in initial_handlers:

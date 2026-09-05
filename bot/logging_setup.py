@@ -7,6 +7,7 @@ import logging.handlers
 import os
 import sys
 from collections.abc import Iterable
+from typing import TextIO
 
 _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 _MIN_SECRET_LENGTH = 8
@@ -50,6 +51,24 @@ class SecretMaskingFilter(logging.Filter):
         return text
 
 
+def _console_stream() -> TextIO:
+    """Возвращает stdout, безопасный для символов вне кодировки консоли.
+
+    На Windows консоль обычно работает в cp1251, а названия треков в
+    Яндекс.Музыке содержат эмодзи и иероглифы. Без этого запись такого
+    названия падает с `UnicodeEncodeError`, сообщение теряется целиком,
+    а в консоль вместо него попадает трейсбек логгера.
+    """
+    stream = sys.stdout
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            logging.getLogger(__name__).debug("Не удалось настроить кодировку вывода консоли")
+    return stream
+
+
 def setup_logging(
     level: str = "INFO",
     secrets: Iterable[str] = (),
@@ -66,7 +85,7 @@ def setup_logging(
     formatter = logging.Formatter(_LOG_FORMAT)
     secret_filter = SecretMaskingFilter(secrets)
 
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    handlers: list[logging.Handler] = [logging.StreamHandler(_console_stream())]
 
     if log_file is not None:
         log_dir = os.path.dirname(os.fspath(log_file))
