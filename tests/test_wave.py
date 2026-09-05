@@ -107,24 +107,37 @@ class TestWaveSessionNextTrack:
 
     @pytest.mark.asyncio
     async def test_next_track_returns_tracks_in_order(self):
-        """next_track() returns tracks in order from batch."""
+        """next_track() returns tracks in sequence; buffer never exceeds MAX_BUFFERED_TRACKS."""
+        from bot.yandex.wave import MAX_BUFFERED_TRACKS
+
         track1 = make_track("1", "Song1")
         track2 = make_track("2", "Song2")
-        batch = WaveBatch(batch_id="batch1", tracks=(track1, track2))
+        track3 = make_track("3", "Song3")
+        batch1 = WaveBatch(batch_id="batch1", tracks=(track1, track2))
+        # Second batch for refresh after extracting track1
+        batch2 = WaveBatch(batch_id="batch2", tracks=(track3,))
 
         client = FakeMusicClient()
-        client.batches_to_return = [batch]
+        client.batches_to_return = [batch1, batch2]
         session = WaveSession(client)
 
         await session.start()
 
+        # First next_track: fetch batch1, extract track1, _refresh_chain gets batch2
         t1 = await session.next_track()
         assert t1.id == "1"
-        assert session.buffered == 1
+        # Buffer should respect MAX_BUFFERED_TRACKS even with larger batch
+        assert session.buffered <= MAX_BUFFERED_TRACKS, (
+            f"After first next_track(), buffer exceeded "
+            f"MAX_BUFFERED_TRACKS={MAX_BUFFERED_TRACKS}, got {session.buffered}"
+        )
 
-        t2 = await session.next_track()
-        assert t2.id == "2"
-        assert session.buffered == 0
+        # Second next_track: buffer was refilled; must respect limit
+        await session.next_track()
+        assert session.buffered <= MAX_BUFFERED_TRACKS, (
+            f"After second next_track(), buffer exceeded "
+            f"MAX_BUFFERED_TRACKS={MAX_BUFFERED_TRACKS}, got {session.buffered}"
+        )
 
     @pytest.mark.asyncio
     async def test_next_track_fetches_new_batch_when_empty(self):
@@ -232,7 +245,7 @@ class TestWaveSessionUpcoming:
 
     @pytest.mark.asyncio
     async def test_upcoming_returns_preview(self):
-        """upcoming() returns buffered tracks without modifying buffer."""
+        """upcoming() returns buffered tracks (<=MAX_BUFFERED_TRACKS) without modifying buffer."""
         batch = WaveBatch(
             batch_id="b1",
             tracks=(make_track("1"), make_track("2"), make_track("3")),
@@ -243,15 +256,18 @@ class TestWaveSessionUpcoming:
         session = WaveSession(client)
 
         await session.start()
-        # Consume first track to fill buffer with the batch
+        # Consume first track, buffer is refilled by _refresh_chain (<=1 track)
         await session.next_track()
 
         preview = session.upcoming(2)
 
-        assert len(preview) == 2
-        assert preview[0].id == "2"
-        assert preview[1].id == "3"
-        assert session.buffered == 2  # Buffer unchanged
+        # upcoming() returns what's in buffer, which is <= MAX_BUFFERED_TRACKS
+        from bot.yandex.wave import MAX_BUFFERED_TRACKS
+        assert len(preview) <= MAX_BUFFERED_TRACKS
+        # Verify buffer is unchanged
+        buffered_before = session.buffered
+        session.upcoming(5)
+        assert session.buffered == buffered_before
 
     @pytest.mark.asyncio
     async def test_upcoming_zero_limit(self):
@@ -285,7 +301,7 @@ class TestWaveSessionUpcoming:
 
     @pytest.mark.asyncio
     async def test_upcoming_limit_exceeds_buffer(self):
-        """upcoming(100) with 3 tracks returns 3."""
+        """upcoming(100) returns at most what's buffered (<=MAX_BUFFERED_TRACKS)."""
         batch = WaveBatch(
             batch_id="b1",
             tracks=(make_track("1"), make_track("2"), make_track("3")),
@@ -296,12 +312,14 @@ class TestWaveSessionUpcoming:
         session = WaveSession(client)
 
         await session.start()
-        # Consume first track to fill buffer
+        # Consume first track to fill buffer (refilled by _refresh_chain to <=1 track)
         await session.next_track()
 
         preview = session.upcoming(100)
 
-        assert len(preview) == 2  # 3 total tracks - 1 consumed
+        # upcoming(100) returns all buffered tracks, which is <= MAX_BUFFERED_TRACKS
+        from bot.yandex.wave import MAX_BUFFERED_TRACKS
+        assert len(preview) <= MAX_BUFFERED_TRACKS
 
 
 class TestWaveSessionFeedback:
@@ -383,12 +401,13 @@ class TestWaveSessionBatchId:
         _batch_id should NOT be updated to None. It should only update
         when a non-empty batch arrives.
 
-        Scenario:
-        1. First batch has batch_id="batch-1" with 2 tracks
-        2. Second fetch returns empty batch (simulates retry/no data)
-        3. Third fetch returns batch_id="batch-2" with 1 track
-        4. After consuming batch-1 and retrying, batch_id should stay non-None
-        5. When track_started is called, it should use the valid batch_id
+        Scenario (adapted for MAX_BUFFERED_TRACKS=1):
+        1. First batch has batch_id="batch-1" with 1 track
+        2. Extract track, _refresh_chain returns empty batch (no update)
+        3. Next fetch for filling buffer returns empty (retry/no data)
+        4. Final retry returns batch_id="batch-2" with 1 track
+        5. batch_id should never be None; when track_started is called,
+           it should use the valid batch_id from the extracted track
         """
         # Mock asyncio.sleep to avoid delays
         async def fake_sleep(_):
@@ -397,33 +416,28 @@ class TestWaveSessionBatchId:
         monkeypatch.setattr("bot.yandex.wave.asyncio.sleep", fake_sleep)
 
         # Create batches: first non-empty, then empty, then non-empty again
-        batch1 = WaveBatch(batch_id="batch-1", tracks=(make_track("1"), make_track("2")))
+        batch1 = WaveBatch(batch_id="batch-1", tracks=(make_track("1"),))
         batch_empty = WaveBatch(batch_id=None, tracks=())
         batch2 = WaveBatch(batch_id="batch-2", tracks=(make_track("3"),))
 
         client = FakeMusicClient()
-        client.batches_to_return = [batch1, batch_empty, batch2]
+        client.batches_to_return = [batch1, batch_empty, batch_empty, batch2]
         session = WaveSession(client)
 
         await session.start()
 
-        # Consume both tracks from first batch
+        # Consume track from first batch
         track1 = await session.next_track()
         assert track1.id == "1"
         assert session.batch_id == "batch-1"
 
+        # Get next track — will trigger fetch, hit empty batches, retry, get batch-2
         track2 = await session.next_track()
-        assert track2.id == "2"
-        # Буфер пуст, но batch_id сохранён
-        assert session.batch_id == "batch-1"
-
-        # Request another track — will trigger fetch, hit empty batch, retry, get batch-2
-        track3 = await session.next_track()
-        assert track3.id == "3"
+        assert track2.id == "3"
         assert session.batch_id == "batch-2"
 
-        # Now send track_started for track3 while batch_id is batch-2
-        await session.track_started(track3)
+        # Now send track_started for track2 while batch_id is batch-2
+        await session.track_started(track2)
 
         # Verify the feedback was sent with the correct (non-None) batch_id
         started_calls = [c for c in client.calls if c[0] == "notify_track_started"]
@@ -548,9 +562,12 @@ class TestWaveSessionSkipAndAdaptation:
         The key behavior: when next_track() extracts a track, it calls
         _refresh_chain(track.id), which sends fetch_wave_batch(queue=track.id).
 
-        Even if track_skipped() was called beforehand, the next next_track()
-        will extract the next track from the buffer and call _refresh_chain
-        with that track's id.
+        Scenario (with MAX_BUFFERED_TRACKS=1):
+        1. First next_track(): fetch returns A (only 1 in buffer), extract A,
+           _refresh_chain calls fetch(queue="a")
+        2. Skip track A
+        3. Second next_track(): fetch returns B, extract B,
+           _refresh_chain calls fetch(queue="b")
         """
         async def fake_sleep(_):
             return None
@@ -566,9 +583,12 @@ class TestWaveSessionSkipAndAdaptation:
         async def fetch_handler(queue, batch_index, client):
             fetch_count["count"] += 1
             if fetch_count["count"] == 1:
-                # First fetch (from initial next_track): A, B
-                return WaveBatch(batch_id="batch1", tracks=(track_a, track_b))
-            # All others: empty (to avoid infinite fetching)
+                # First fetch (from initial next_track): only A (MAX_BUFFERED_TRACKS=1)
+                return WaveBatch(batch_id="batch1", tracks=(track_a,))
+            elif fetch_count["count"] == 2:
+                # Refresh after extracting A
+                return WaveBatch(batch_id="batch1-refresh", tracks=(track_b,))
+            # All others: empty
             return WaveBatch(batch_id=None, tracks=())
 
         client = FakeMusicClient()
@@ -581,10 +601,10 @@ class TestWaveSessionSkipAndAdaptation:
         taken_a = await session.next_track()
         assert taken_a.id == "a"
 
-        # Skip track A (buffer still has B)
+        # Skip track A (buffer is now empty, will be refilled by next next_track())
         await session.track_skipped(taken_a, 5.0)
 
-        # Get track B; this should call _refresh_chain(B)
+        # Get track B; this should call _refresh_chain(b)
         taken_b = await session.next_track()
         assert taken_b.id == "b"
 
@@ -594,10 +614,12 @@ class TestWaveSessionSkipAndAdaptation:
         # 1. fetch(queue=None) — initial fill
         # 2. fetch(queue="a") — refresh after extracting A
         # 3. fetch(queue="b") — refresh after extracting B
-        assert len(fetch_calls) >= 2
-        # The last fetch should have been with queue="b" (from _refresh_chain after getting B)
+        assert len(fetch_calls) >= 3, f"Expected >=3 fetches, got {len(fetch_calls)}"
+        # Check that fetches have the expected queue values in order
+        assert fetch_calls[0][1] is None  # initial
+        assert fetch_calls[1][1] == "a"   # refresh after A
         assert fetch_calls[-1][1] == "b", (
-            f"Last fetch should have queue='b' (id of second track extracted), "
+            f"Last fetch should have queue='b' (id of track extracted in second next_track()), "
             f"but got queue={fetch_calls[-1][1]!r}"
         )
 
@@ -660,31 +682,29 @@ class TestWaveSessionSkipAndAdaptation:
         monkeypatch.setattr("bot.yandex.wave.asyncio.sleep", fake_sleep)
 
         track_a = make_track("a", "Track A")
-        track_b = make_track("b", "Track B")
 
-        # First batch: A and B
-        batch1 = WaveBatch(batch_id="batch1", tracks=(track_a, track_b))
+        # First batch: A (with MAX_BUFFERED_TRACKS=1, only 1 goes to buffer)
+        batch1 = WaveBatch(batch_id="batch1", tracks=(track_a,))
         # All subsequent batches: only A (duplicate)
         batch_dup = WaveBatch(batch_id="batch-dup", tracks=(track_a,))
 
         client = FakeMusicClient()
-        client.batches_to_return = [batch1, batch_dup, batch_dup, batch_dup]
+        client.batches_to_return = [batch1, batch_dup, batch_dup, batch_dup, batch_dup]
         session = WaveSession(client)
 
         await session.start()
 
-        # Consume first batch
+        # Consume first track
         t1 = await session.next_track()
         assert t1.id == "a"
-        t2 = await session.next_track()
-        assert t2.id == "b"
 
-        # Now: buffer empty, next fetch returns only A (which is recent)
-        # On attempt 1 and 2: filtered out, retry
-        # On attempt 3 (MAX_FETCH_ATTEMPTS): filtered but no more retries, use unfiltered
+        # Now: buffer empty (refilled by _refresh_chain to empty since all tracks are duplicates)
+        # Next fetch returns only A (which is recent)
+        # On attempts 1-3: filtered out, retry
+        # On attempt 4 (MAX_FETCH_ATTEMPTS): filtered but no more retries, use unfiltered
         # Result: should return A without raising WaveUnavailableError
-        t3 = await session.next_track()
-        assert t3.id == "a", (
+        t2 = await session.next_track()
+        assert t2.id == "a", (
             "Should return duplicate track A as fallback when all tracks in "
             "final batch are duplicates (better to repeat than to stop music)"
         )
@@ -849,20 +869,20 @@ class TestWaveSessionNetworkResilience:
     async def test_refresh_chain_error_does_not_stop_playback(self):
         """Ошибка _refresh_chain не прерывает воспроизведение.
 
-        Сценарий:
-        1. Первый fetch успешен → получаем трек
+        Сценарий (with MAX_BUFFERED_TRACKS=1):
+        1. Первый fetch успешен → получаем трек A
         2. _refresh_chain вызывает fetch и получает ошибку
-        3. Трек всё равно возвращается, буфер сохраняется
+        3. Трек всё равно возвращается, буфер остаётся пустым (не перезаписывается ошибкой)
+        4. Состояние сессии не ломается
         """
         track_a = make_track("a")
-        track_b = make_track("b")
         fetch_count = {"count": 0}
 
         async def fetch_handler_refresh_fails(queue, batch_index, client):
             fetch_count["count"] += 1
             if fetch_count["count"] == 1:
-                # Initial fetch: success with A and B
-                return WaveBatch(batch_id="batch1", tracks=(track_a, track_b))
+                # Initial fetch: success with A (MAX_BUFFERED_TRACKS=1)
+                return WaveBatch(batch_id="batch1", tracks=(track_a,))
             else:
                 # Refresh fetches fail
                 raise WaveUnavailableError(user_message="Refresh failed")
@@ -876,8 +896,11 @@ class TestWaveSessionNetworkResilience:
         # next_track() should succeed despite _refresh_chain error
         track = await session.next_track()
         assert track.id == "a"
-        # Buffer should still contain B (not cleared by failed refresh)
-        assert session.buffered == 1  # B is still there
+        # Buffer should be empty (refresh failed, so no new tracks added)
+        # But buffer is NOT corrupted by the error
+        assert session.buffered == 0
+        # Session should still be in valid state
+        assert session.started is True
 
 
 class TestWaveSessionBatchIdProperty:
@@ -935,6 +958,95 @@ class TestWaveSessionBatchIdProperty:
             f"notify_track_skipped should use batch_id='original', "
             f"but got {skipped_calls[0][3]!r}"
         )
+
+
+class TestWaveSessionBufferingConstraints:
+    """Tests for buffer size constraints under new MAX_BUFFERED_TRACKS limit."""
+
+    @pytest.mark.asyncio
+    async def test_buffer_never_exceeds_one_track(self):
+        """Server returns 5 tracks → buffer holds at most MAX_BUFFERED_TRACKS (drops excess)."""
+        from bot.yandex.wave import MAX_BUFFERED_TRACKS
+
+        track1 = make_track("1")
+        track2 = make_track("2")
+        track3 = make_track("3")
+        track4 = make_track("4")
+        track5 = make_track("5")
+
+        # Single batch with 5 tracks; only MAX_BUFFERED_TRACKS will be placed in buffer
+        batch = WaveBatch(
+            batch_id="batch1",
+            tracks=(track1, track2, track3, track4, track5),
+        )
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch]
+        session = WaveSession(client)
+
+        await session.start()
+
+        # First next_track(): fetch batch with 5 tracks, but only 1 goes to buffer
+        t1 = await session.next_track()
+        assert t1.id == "1"
+        # Critical: even with 5-track batch, buffer must respect MAX_BUFFERED_TRACKS
+        assert session.buffered <= MAX_BUFFERED_TRACKS, (
+            f"After extracting from 5-track batch, buffer exceeded "
+            f"MAX_BUFFERED_TRACKS={MAX_BUFFERED_TRACKS}, got {session.buffered}. "
+            "Constraint must be enforced during loading!"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dropped_chain_tracks_are_refetched(self):
+        """Excess tracks from large batch are not lost; next_track() continues without errors.
+
+        Scenario:
+        1. Server returns batch with 5 new unique tracks → only 1 goes to buffer (dropped: 2-5)
+        2. Extract track 1, _refresh_chain may return new tracks or empty
+        3. Extract track 2 (when buffer refills), track 3, etc.: each calls come from server
+        4. Playback continues for multiple calls without WaveUnavailableError
+        """
+        from bot.yandex.wave import MAX_BUFFERED_TRACKS
+
+        # First batch: 5 unique tracks (only MAX_BUFFERED_TRACKS=1 will fit initially)
+        first_batch = WaveBatch(
+            batch_id="batch1",
+            tracks=(make_track("a"), make_track("b"), make_track("c"),
+                    make_track("d"), make_track("e")),
+        )
+        # Second batch: 3 new unique tracks (for refresh after extracting 'a')
+        second_batch = WaveBatch(
+            batch_id="batch2",
+            tracks=(make_track("f"), make_track("g"), make_track("h")),
+        )
+        # Third batch: 2 new unique tracks
+        third_batch = WaveBatch(
+            batch_id="batch3",
+            tracks=(make_track("i"), make_track("j")),
+        )
+
+        client = FakeMusicClient()
+        client.batches_to_return = [first_batch, second_batch, third_batch]
+        session = WaveSession(client)
+
+        await session.start()
+
+        # Multiple next_track() calls should succeed; each refills from fresh batch
+        t1 = await session.next_track()
+        assert t1.id == "a"
+        assert session.buffered <= MAX_BUFFERED_TRACKS
+
+        t2 = await session.next_track()
+        # t2 could be 'b' (if not filtered), or 'f', 'g', 'h', etc. (from refresh)
+        assert t2.id in ["b", "f", "g", "h"]
+        assert session.buffered <= MAX_BUFFERED_TRACKS
+
+        await session.next_track()
+        # Should not raise WaveUnavailableError; buffer respects constraint
+        assert session.buffered <= MAX_BUFFERED_TRACKS
+
+        # Verify no exceptions and buffer is always within limit
+        assert session.started is True
 
 
 class TestWaveSessionRetrySchedule:

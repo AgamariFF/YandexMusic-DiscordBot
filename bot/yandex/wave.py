@@ -13,9 +13,18 @@ logger = logging.getLogger(__name__)
 
 RECENT_TRACKS_MEMORY = 50
 
+# Держим ровно один следующий трек: цепочка перезапрашивается после каждого
+# выданного трека (см. `_refresh_chain`), поэтому более глубокий запас всё
+# равно успевает устареть к моменту, когда до него дойдёт очередь.
+MAX_BUFFERED_TRACKS = 1
+
 
 class WaveSession:
     """Сессия «Моей волны»: буферизует треки цепочкой и отправляет фидбек.
+
+    В буфере хранится не больше `MAX_BUFFERED_TRACKS` (один) следующего
+    трека — глубже намеренно не буферизуем, так как цепочка всё равно
+    обновляется после каждого выданного трека.
 
     Пропуск трека НЕ пересобирает очередь: следующий трек по-прежнему берётся
     из уже полученной цепочки буфера — ровно тот, что показывался в `/queue`.
@@ -101,7 +110,7 @@ class WaveSession:
                         if repeats:
                             logger.debug("Отфильтровано недавно игравших треков: %d", repeats)
                         self._batch_id = batch.batch_id
-                        self._buffer.extend(fresh)
+                        self._buffer.extend(fresh[:MAX_BUFFERED_TRACKS])
                         break
                     repeats_only = batch.tracks
                     repeats_only_batch_id = batch.batch_id
@@ -115,7 +124,7 @@ class WaveSession:
                     "проигрываем их повторно, чтобы не прерывать музыку"
                 )
                 self._batch_id = repeats_only_batch_id
-                self._buffer.extend(repeats_only)
+                self._buffer.extend(repeats_only[:MAX_BUFFERED_TRACKS])
 
             if not self._buffer:
                 raise WaveUnavailableError(
@@ -197,7 +206,7 @@ class WaveSession:
             return
 
         self._buffer.clear()
-        self._buffer.extend(fresh)
+        self._buffer.extend(fresh[:MAX_BUFFERED_TRACKS])
         self._batch_id = batch.batch_id
         logger.debug("Цепочка «Моей волны» обновлена, в буфере %d треков", len(self._buffer))
 

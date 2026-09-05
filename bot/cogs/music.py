@@ -221,18 +221,17 @@ class MusicCog(commands.Cog, name="Музыка"):
         embed.add_field(name="Статус", value="на паузе" if info.paused else "играет")
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="queue", description="Показать ближайшие треки волны")
+    @app_commands.command(name="queue", description="Показать следующий трек волны")
     @app_commands.guild_only()
     async def queue(self, interaction: discord.Interaction) -> None:
-        """Показывает до 10 ближайших треков из буфера волны."""
-        tracks = self._player.queue_preview(10)
+        """Показывает следующий забуференный трек волны."""
+        tracks = self._player.queue_preview(1)
         if not tracks:
             await interaction.response.send_message(
-                "Буфер пуст — «Моя волна» подберёт треки на лету."
+                "Буфер пуст — «Моя волна» подберёт следующий трек на лету."
             )
             return
-        lines = [f"{i}. {track.display}" for i, track in enumerate(tracks, start=1)]
         embed = discord.Embed(
-            title="Ближайшие треки", description="\n".join(lines), color=EMBED_COLOR
+            title="Следующий трек", description=tracks[0].display, color=EMBED_COLOR
         )
         await interaction.response.send_message(embed=embed)
