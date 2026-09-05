@@ -1,5 +1,6 @@
 """Tests for bot.yandex.wave module."""
 
+
 import pytest
 
 from bot.errors import WaveUnavailableError
@@ -337,3 +338,59 @@ class TestWaveSessionBatchId:
 
         await session.next_track()
         assert session.batch_id == "custom-batch-123"
+
+    @pytest.mark.asyncio
+    async def test_batch_id_preserved_across_empty_batch_retry(self, monkeypatch):
+        """batch_id is not overwritten by empty batch during retry.
+
+        Regression test: in next_track(), when an empty batch is fetched,
+        _batch_id should NOT be updated to None. It should only update
+        when a non-empty batch arrives.
+
+        Scenario:
+        1. First batch has batch_id="batch-1" with 2 tracks
+        2. Second fetch returns empty batch (simulates retry/no data)
+        3. Third fetch returns batch_id="batch-2" with 1 track
+        4. After consuming batch-1 and retrying, batch_id should stay non-None
+        5. When track_started is called, it should use the valid batch_id
+        """
+        # Mock asyncio.sleep to avoid delays
+        async def fake_sleep(_):
+            return None
+
+        monkeypatch.setattr("bot.yandex.wave.asyncio.sleep", fake_sleep)
+
+        # Create batches: first non-empty, then empty, then non-empty again
+        batch1 = WaveBatch(batch_id="batch-1", tracks=(make_track("1"), make_track("2")))
+        batch_empty = WaveBatch(batch_id=None, tracks=())
+        batch2 = WaveBatch(batch_id="batch-2", tracks=(make_track("3"),))
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch1, batch_empty, batch2]
+        session = WaveSession(client)
+
+        await session.start()
+
+        # Consume both tracks from first batch
+        track1 = await session.next_track()
+        assert track1.id == "1"
+        assert session.batch_id == "batch-1"
+
+        track2 = await session.next_track()
+        assert track2.id == "2"
+        # Буфер пуст, но batch_id сохранён
+        assert session.batch_id == "batch-1"
+
+        # Request another track — will trigger fetch, hit empty batch, retry, get batch-2
+        track3 = await session.next_track()
+        assert track3.id == "3"
+        assert session.batch_id == "batch-2"
+
+        # Now send track_started for track3 while batch_id is batch-2
+        await session.track_started(track3)
+
+        # Verify the feedback was sent with the correct (non-None) batch_id
+        started_calls = [c for c in client.calls if c[0] == "notify_track_started"]
+        assert len(started_calls) == 1
+        assert started_calls[0][1] == "3"
+        assert started_calls[0][2] == "batch-2"  # batch_id must NOT be None

@@ -60,6 +60,8 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
         guild_id = int(guild_id_raw)
     except ValueError as exc:
         raise ConfigError("Переменная окружения GUILD_ID должна быть целым числом.") from exc
+    if guild_id <= 0:
+        raise ConfigError("Переменная окружения GUILD_ID должна быть положительным числом.")
 
     log_level = os.environ.get("LOG_LEVEL", "").strip().upper() or _DEFAULT_LOG_LEVEL
     if log_level not in _ALLOWED_LOG_LEVELS:

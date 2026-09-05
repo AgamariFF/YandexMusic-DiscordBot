@@ -38,6 +38,9 @@ class SecretMaskingFilter(logging.Filter):
             exc_text = logging.Formatter().formatException(record.exc_info)
             record.exc_text = self._mask(exc_text)
 
+        if record.stack_info:
+            record.stack_info = self._mask(record.stack_info)
+
         return True
 
     def _mask(self, text: str) -> str:
@@ -79,6 +82,13 @@ def setup_logging(
         handler.setFormatter(formatter)
         handler.addFilter(secret_filter)
         root_logger.addHandler(handler)
+
+    # Дополнительно вешаем фильтр на сам root-логгер: если в будущем добавят
+    # хендлер без фильтра, запись всё равно не покажет секреты.
+    for existing_filter in list(root_logger.filters):
+        if isinstance(existing_filter, SecretMaskingFilter):
+            root_logger.removeFilter(existing_filter)
+    root_logger.addFilter(secret_filter)
 
     for logger_name in _NOISY_LOGGER_NAMES:
         logging.getLogger(logger_name).setLevel(logging.WARNING)

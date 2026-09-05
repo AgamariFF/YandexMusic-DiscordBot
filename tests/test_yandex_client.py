@@ -274,15 +274,16 @@ class TestYandexMusicClientResolveStream:
         assert info2.get_direct_link_async.called
 
     @pytest.mark.asyncio
-    async def test_resolve_direct_link_used_if_available(self):
-        """resolve_stream_url returns direct link if available."""
+    async def test_resolve_stream_url_ignores_direct_bool_flag(self):
+        """resolve_stream_url ignores direct bool flag and calls get_direct_link_async."""
         track_raw = SimpleNamespace()
+        expected_url = "https://actual-link.com/stream"
         info = SimpleNamespace(
             codec="mp3",
             preview=False,
             bitrate_in_kbps=320,
-            direct="https://direct-link.com/stream",
-            get_direct_link_async=AsyncMock(),
+            direct=True,  # bool flag, not a URL string
+            get_direct_link_async=AsyncMock(return_value=expected_url),
         )
         track_raw.get_download_info_async = AsyncMock(return_value=[info])
 
@@ -292,8 +293,11 @@ class TestYandexMusicClientResolveStream:
         track = TrackInfo(id="1", title="Song", artists="Artist", duration=180.0, raw=track_raw)
         url = await client.resolve_stream_url(track)
 
-        assert url == "https://direct-link.com/stream"
-        assert not info.get_direct_link_async.called
+        # The URL must come from get_direct_link_async, not from direct field
+        assert url == expected_url
+        assert url is not True
+        assert isinstance(url, str)
+        assert info.get_direct_link_async.called
 
     @pytest.mark.asyncio
     async def test_resolve_empty_list_raises_error(self):

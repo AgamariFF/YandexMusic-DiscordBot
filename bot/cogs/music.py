@@ -89,6 +89,10 @@ class MusicCog(commands.Cog, name="Музыка"):
         original = error.original if isinstance(error, app_commands.CommandInvokeError) else error
         command_name = interaction.command.qualified_name if interaction.command else "?"
 
+        if isinstance(original, app_commands.CheckFailure):
+            # interaction_check уже отправил пользователю сообщение и вернул False.
+            return
+
         if isinstance(original, BotError):
             logger.warning("Ошибка команды /%s: %s", command_name, original)
             await self._send_error(interaction, original.user_message)
@@ -99,9 +103,12 @@ class MusicCog(commands.Cog, name="Музыка"):
 
     @staticmethod
     async def _send_error(interaction: discord.Interaction, text: str) -> None:
-        """Отправляет текст ошибки эфемерно с учётом того, был ли ответ уже начат."""
+        """Отправляет текст ошибки с учётом того, был ли ответ уже начат (в т.ч. отложен)."""
         if interaction.response.is_done():
-            await interaction.followup.send(text, ephemeral=True)
+            try:
+                await interaction.edit_original_response(content=text)
+            except (discord.HTTPException, discord.NotFound):
+                await interaction.followup.send(text, ephemeral=True)
         else:
             await interaction.response.send_message(text, ephemeral=True)
 

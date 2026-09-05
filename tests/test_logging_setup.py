@@ -207,3 +207,47 @@ class TestSetupLogging:
                 root_logger.removeHandler(handler)
             for handler in initial_handlers:
                 root_logger.addHandler(handler)
+
+    def test_secret_in_stack_info_masked(self):
+        """Secret in record.stack_info is masked."""
+        secret = "stack-secret-token-123456"
+        filter_obj = SecretMaskingFilter([secret])
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="Test message",
+            args=(),
+            exc_info=None,
+        )
+        record.stack_info = f"Stack trace with {secret} in it"
+
+        filter_obj.filter(record)
+
+        assert secret not in record.stack_info
+        assert "***" in record.stack_info
+
+    def test_setup_logging_adds_filter_to_root_logger(self):
+        """setup_logging adds SecretMaskingFilter to root logger."""
+        root_logger = logging.getLogger()
+        initial_handlers = list(root_logger.handlers)
+        initial_filters = list(root_logger.filters)
+
+        try:
+            secret = "root-logger-secret-token-123456"
+            setup_logging(level="INFO", secrets=[secret], log_file=None)
+
+            # Check that root logger has SecretMaskingFilter
+            has_secret_filter = any(isinstance(f, SecretMaskingFilter) for f in root_logger.filters)
+            assert has_secret_filter
+        finally:
+            # Restore
+            for handler in root_logger.handlers[:]:
+                root_logger.removeHandler(handler)
+            for handler in initial_handlers:
+                root_logger.addHandler(handler)
+            for filter_obj in root_logger.filters[:]:
+                root_logger.removeFilter(filter_obj)
+            for filter_obj in initial_filters:
+                root_logger.addFilter(filter_obj)

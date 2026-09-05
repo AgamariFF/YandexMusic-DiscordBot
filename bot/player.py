@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -79,7 +80,6 @@ class GuildPlayer:
         self._source: TrackedAudioSource | None = None
         self._state = PlayerState.IDLE
 
-        self._suppress_advance = False
         self._consecutive_failures = 0
 
         self._idle_task: asyncio.Task[None] | None = None
@@ -136,7 +136,7 @@ class GuildPlayer:
         """Отключается от голосового канала и сбрасывает состояние. Идемпотентен."""
         async with self._lock:
             await self._cancel_idle_timer_locked()
-            self._stop_playback_locked(suppress_advance=True)
+            self._stop_playback_locked()
             self._stop_locked_state()
             self._consecutive_failures = 0
             if self._voice_client is not None:
@@ -177,15 +177,11 @@ class GuildPlayer:
             track = self._current_track
             session = self._session
             elapsed = self._source.elapsed if self._source is not None else 0.0
-            self._stop_playback_locked(suppress_advance=True)
+            self._stop_playback_locked()
             self._current_track = None
-            self._source = None
 
             if session is not None:
-                try:
-                    await session.track_skipped(track, elapsed)
-                except (YandexAuthError, WaveUnavailableError):
-                    logger.warning("Не удалось отправить фидбек о пропуске трека %s", track.id)
+                await session.track_skipped(track, elapsed)
 
             return await self._advance_locked()
 
@@ -226,7 +222,7 @@ class GuildPlayer:
             elapsed = self._source.elapsed if self._source is not None else 0.0
             was_paused = self._state is PlayerState.PAUSED
 
-            self._stop_playback_locked(suppress_advance=True)
+            self._stop_playback_locked()
             try:
                 await self._play_track_locked(track, seek=elapsed, notify=False)
             except BotError as exc:
@@ -259,21 +255,18 @@ class GuildPlayer:
             return []
         return self._session.upcoming(limit)
 
-    async def stop(self) -> None:
-        """Останавливает воспроизведение и сбрасывает волну, не отключаясь от канала."""
-        async with self._lock:
-            self._stop_playback_locked(suppress_advance=True)
-            self._stop_locked_state()
-            self._consecutive_failures = 0
-
-    def _after_playback(self, error: BaseException | None) -> None:
+    def _after_playback(
+        self, source: TrackedAudioSource, error: BaseException | None
+    ) -> None:
         """Callback discord.py из потока аудио-плеера: планирует продолжение в event loop."""
         if error is not None:
             logger.error("Ошибка воспроизведения аудио: %s", error)
         loop = self._loop
         if loop is None:
             return
-        future = asyncio.run_coroutine_threadsafe(self._handle_playback_finished(), loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self._handle_playback_finished(source), loop
+        )
         future.add_done_callback(self._log_playback_finished_result)
 
     @staticmethod
@@ -286,26 +279,21 @@ class GuildPlayer:
         except Exception:
             logger.exception("Ошибка при обработке завершения воспроизведения трека")
 
-    async def _handle_playback_finished(self) -> None:
-        """Обрабатывает естественное завершение трека: фидбек и переход к следующему."""
+    async def _handle_playback_finished(self, source: TrackedAudioSource) -> None:
+        """Обрабатывает завершение колбэка конкретного источника: фидбек и переход дальше."""
         async with self._lock:
-            if self._suppress_advance:
-                self._suppress_advance = False
+            if source is not self._source:
+                # Колбэк от уже заменённого/остановленного источника — не наш случай.
                 return
 
             track = self._current_track
             session = self._session
-            elapsed = self._source.elapsed if self._source is not None else 0.0
+            elapsed = source.elapsed
             self._current_track = None
             self._source = None
 
             if track is not None and session is not None:
-                try:
-                    await session.track_finished(track, elapsed)
-                except (YandexAuthError, WaveUnavailableError):
-                    logger.warning(
-                        "Не удалось отправить фидбек о завершении трека %s", track.id
-                    )
+                await session.track_finished(track, elapsed)
 
             await self._advance_locked()
 
@@ -359,24 +347,36 @@ class GuildPlayer:
             raise NotConnectedError()
 
         url = await self._client.resolve_stream_url(track)
-        source = create_source(
-            url,
-            volume=self._volume,
-            bass=self._bass,
-            ffmpeg_path=self._ffmpeg_path,
-            seek=seek,
-        )
-        self._voice_client.play(source, after=self._after_playback)
+        try:
+            source = create_source(
+                url,
+                volume=self._volume,
+                bass=self._bass,
+                ffmpeg_path=self._ffmpeg_path,
+                seek=seek,
+            )
+            self._voice_client.play(
+                source, after=functools.partial(self._after_playback, source)
+            )
+        except (discord.ClientException, discord.opus.OpusNotLoaded) as exc:
+            raise VoiceConnectError(
+                f"Не удалось начать воспроизведение трека {track.id}: {exc}",
+                user_message="Не удалось начать воспроизведение в голосовом канале.",
+            ) from exc
+        except BotError:
+            raise
+        except Exception as exc:
+            raise TrackUnavailableError(
+                f"Не удалось создать источник аудио для трека {track.id}: {exc}"
+            ) from exc
+
         self._current_track = track
         self._source = source
         self._state = PlayerState.PLAYING
         self._restart_idle_timer_locked()
 
         if notify and self._session is not None:
-            try:
-                await self._session.track_started(track)
-            except (YandexAuthError, WaveUnavailableError):
-                logger.warning("Не удалось отправить фидбек о старте трека %s", track.id)
+            await self._session.track_started(track)
 
         if notify and self._announce is not None:
             try:
@@ -389,23 +389,23 @@ class GuildPlayer:
         track = self._current_track
         session = self._session
         elapsed = self._source.elapsed if self._source is not None else 0.0
-        self._stop_playback_locked(suppress_advance=True)
+        self._stop_playback_locked()
         if track is not None and session is not None:
-            try:
-                await session.track_skipped(track, elapsed)
-            except (YandexAuthError, WaveUnavailableError):
-                logger.warning(
-                    "Не удалось отправить фидбек о прерывании трека %s", track.id
-                )
+            await session.track_skipped(track, elapsed)
         self._current_track = None
-        self._source = None
 
-    def _stop_playback_locked(self, *, suppress_advance: bool) -> None:
-        """Останавливает активное воспроизведение voice_client, если оно идёт."""
+    def _stop_playback_locked(self) -> None:
+        """Останавливает активное воспроизведение и снимает identity текущего источника.
+
+        Сброс `self._source` до вызова `stop()` гарантирует, что колбэк, который
+        придёт по уже остановленному источнику, распознает себя как чужой
+        (identity-проверка в `_handle_playback_finished`) и не продвинет очередь
+        повторно.
+        """
         if self._voice_client is None:
             return
+        self._source = None
         if self._voice_client.is_playing() or self._voice_client.is_paused():
-            self._suppress_advance = suppress_advance
             self._voice_client.stop()
 
     def _stop_locked_state(self) -> None:

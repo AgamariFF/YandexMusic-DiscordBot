@@ -179,7 +179,7 @@ class YandexMusicClient:
         """Возвращает прямую ссылку на аудиопоток лучшего доступного качества."""
         self._require_client()
         try:
-            infos = await track.raw.get_download_info_async(get_direct_links=True)
+            infos = await track.raw.get_download_info_async()
         except UnauthorizedError as exc:
             raise YandexAuthError() from exc
         except YandexMusicError as exc:
@@ -198,9 +198,6 @@ class YandexMusicClient:
         logger.debug(
             "Выбран поток трека %s: codec=%s bitrate=%s", track.id, best.codec, best.bitrate_in_kbps
         )
-
-        if best.direct:
-            return best.direct
 
         try:
             return await best.get_direct_link_async()

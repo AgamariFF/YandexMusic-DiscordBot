@@ -129,6 +129,34 @@ class TestLoadConfigValidation:
         assert isinstance(config.guild_id, int)
         assert config.guild_id == 987654321
 
+    def test_guild_id_zero_raises_error(self, clean_env, monkeypatch):
+        """GUILD_ID of 0 raises ConfigError."""
+        monkeypatch.setenv("DISCORD_TOKEN", "token1")
+        monkeypatch.setenv("GUILD_ID", "0")
+        monkeypatch.setenv("YANDEX_MUSIC_TOKEN", "token2")
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(env_file=None)
+        # Verify error mentions GUILD_ID but not token values
+        error_text = str(exc_info.value)
+        assert "GUILD_ID" in error_text
+        assert "token1" not in error_text
+        assert "token2" not in error_text
+
+    def test_guild_id_negative_raises_error(self, clean_env, monkeypatch):
+        """Negative GUILD_ID raises ConfigError."""
+        monkeypatch.setenv("DISCORD_TOKEN", "token1")
+        monkeypatch.setenv("GUILD_ID", "-5")
+        monkeypatch.setenv("YANDEX_MUSIC_TOKEN", "token2")
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(env_file=None)
+        # Verify error mentions GUILD_ID but not token values
+        error_text = str(exc_info.value)
+        assert "GUILD_ID" in error_text
+        assert "token1" not in error_text
+        assert "token2" not in error_text
+
 
 class TestLoadConfigLogLevel:
     """LOG_LEVEL validation and parsing."""

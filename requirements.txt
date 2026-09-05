@@ -1,4 +1,4 @@
-discord.py[voice]>=2.4
+discord.py[voice]>=2.6
 yandex-music>=3.0.0
 python-dotenv>=1.0
 PyNaCl>=1.5

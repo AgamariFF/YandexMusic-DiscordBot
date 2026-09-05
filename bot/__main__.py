@@ -28,6 +28,7 @@ class WaveBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self._config = config
         self._yandex_client: YandexMusicClient | None = None
+        self.fatal_error = False
 
     async def setup_hook(self) -> None:
         """Подключает Яндекс-клиент, регистрирует ког и синхронизирует команды сервера."""
@@ -36,6 +37,8 @@ class WaveBot(commands.Bot):
             await client.connect()
         except YandexAuthError:
             logger.error("Не удалось авторизоваться в Яндекс.Музыке: неверный токен.")
+            await client.close()
+            self.fatal_error = True
             await self.close()
             return
         self._yandex_client = client
@@ -69,7 +72,7 @@ def main() -> None:
         config = load_config()
     except ConfigError as exc:
         logging.basicConfig(level="INFO")
-        logging.getLogger(__name__).error("%s", exc.user_message)
+        logging.getLogger(__name__).error("%s", exc)
         sys.exit(1)
 
     setup_logging(config.log_level, secrets=config.secrets)
@@ -87,6 +90,10 @@ def main() -> None:
         sys.exit(1)
     except KeyboardInterrupt:
         logger.info("Остановка по Ctrl+C.")
+        return
+
+    if bot.fatal_error:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

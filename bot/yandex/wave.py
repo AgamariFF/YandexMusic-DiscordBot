@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import deque
 
@@ -15,6 +16,7 @@ class WaveSession:
     """Сессия «Моей волны»: буферизует треки пачками и отправляет фидбек."""
 
     MAX_FETCH_ATTEMPTS = 3
+    RETRY_DELAY_SECONDS = 1.0
 
     def __init__(self, client: YandexMusicClient) -> None:
         """Запоминает клиент и инициализирует пустое состояние сессии."""
@@ -57,10 +59,12 @@ class WaveSession:
             for attempt in range(1, self.MAX_FETCH_ATTEMPTS + 1):
                 logger.debug("Попытка %d получить пачку треков волны", attempt)
                 batch = await self._client.fetch_wave_batch(queue=self._last_track_id)
-                self._batch_id = batch.batch_id
                 if batch.tracks:
+                    self._batch_id = batch.batch_id
                     self._buffer.extend(batch.tracks)
                     break
+                if attempt < self.MAX_FETCH_ATTEMPTS:
+                    await asyncio.sleep(self.RETRY_DELAY_SECONDS)
             if not self._buffer:
                 raise WaveUnavailableError(
                     user_message="Не удалось получить треки «Моей волны». Попробуйте позже."

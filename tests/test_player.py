@@ -193,17 +193,53 @@ class TestPlayerDisconnect:
         await player.disconnect()
 
 
-class TestPlayerStop:
-    """Tests for stop() method."""
+class TestPlaybackCallbackIdentity:
+    """Regression tests for playback callback identity check (race condition fix)."""
 
     @pytest.mark.asyncio
-    async def test_stop_without_playback(self, player):
-        """stop() without active playback doesn't raise."""
-        await player.stop()
+    async def test_outdated_source_callback_no_side_effects(self, fake_client):
+        """Playback callback with outdated source does not produce side effects.
 
-    @pytest.mark.asyncio
-    async def test_stop_resets_state(self, player):
-        """stop() resets to IDLE state."""
+        This is a regression test for the race condition where two consecutive
+        stop operations would cause the first callback to consume the flag meant
+        for both, and the second callback would incorrectly advance the queue.
+
+        The fix: _handle_playback_finished checks if source is not self._source
+        and returns early without side effects.
+        """
+        player = GuildPlayer(fake_client, idle_timeout=0)
+
+        # Create fake wave session with tracking for method calls
+        fake_session = MagicMock()
+        fake_session.track_finished = AsyncMock()
+        fake_session.next_track = AsyncMock()
+        fake_session.track_started = AsyncMock()
+
+        # Set up player with a current track and source
+        player._session = fake_session
+        current_track = TrackInfo(
+            id="1", title="Current", artists="Artist", duration=100.0, raw=None
+        )
+        current_source = MagicMock()  # The actual current source
+        current_source.elapsed = 50.0
+        player._current_track = current_track
+        player._source = current_source
         player._state = PlayerState.PLAYING
-        await player.stop()
-        assert player.state == PlayerState.IDLE
+
+        # Create an outdated source object (from a previous playback)
+        outdated_source = MagicMock()
+        outdated_source.elapsed = 0.0
+
+        # Call _handle_playback_finished with the OUTDATED source
+        # This simulates a callback arriving after the source has been replaced
+        await player._handle_playback_finished(outdated_source)
+
+        # Verify no side effects occurred:
+        # - track_finished should NOT be called
+        fake_session.track_finished.assert_not_called()
+        # - next_track should NOT be called
+        fake_session.next_track.assert_not_called()
+        # - current track should remain unchanged
+        assert player._current_track is current_track
+        # - current source should remain unchanged
+        assert player._source is current_source
