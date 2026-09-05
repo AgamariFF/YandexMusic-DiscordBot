@@ -143,8 +143,8 @@ class YandexMusicClient:
 
     async def notify_track_started(self, track_id: str, batch_id: str | None) -> None:
         """Сообщает API о начале воспроизведения трека."""
-        client = self._require_client()
         try:
+            client = self._require_client()
             await client.rotor_station_feedback_track_started(
                 self._station, track_id, batch_id=batch_id
             )
@@ -155,8 +155,8 @@ class YandexMusicClient:
         self, track_id: str, played_seconds: float, batch_id: str | None
     ) -> None:
         """Сообщает API об окончании воспроизведения трека."""
-        client = self._require_client()
         try:
+            client = self._require_client()
             await client.rotor_station_feedback_track_finished(
                 self._station, track_id, played_seconds, batch_id=batch_id
             )
@@ -167,8 +167,8 @@ class YandexMusicClient:
         self, track_id: str, played_seconds: float, batch_id: str | None
     ) -> None:
         """Сообщает API о пропуске трека."""
-        client = self._require_client()
         try:
+            client = self._require_client()
             await client.rotor_station_feedback_skip(
                 self._station, track_id, played_seconds, batch_id=batch_id
             )

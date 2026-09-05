@@ -107,7 +107,7 @@ class MusicCog(commands.Cog, name="Музыка"):
         if interaction.response.is_done():
             try:
                 await interaction.edit_original_response(content=text)
-            except (discord.HTTPException, discord.NotFound):
+            except discord.HTTPException:  # NotFound — её подкласс
                 await interaction.followup.send(text, ephemeral=True)
         else:
             await interaction.response.send_message(text, ephemeral=True)

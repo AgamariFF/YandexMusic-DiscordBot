@@ -83,8 +83,10 @@ def setup_logging(
         handler.addFilter(secret_filter)
         root_logger.addHandler(handler)
 
-    # Дополнительно вешаем фильтр на сам root-логгер: если в будущем добавят
-    # хендлер без фильтра, запись всё равно не покажет секреты.
+    # Дополнительно вешаем фильтр на сам root-логгер. Это подстраховка только для
+    # записей, созданных напрямую на root (logging.error(...)): записи дочерних
+    # логгеров приходят через callHandlers и фильтры логгера не проходят.
+    # Основную защиту даёт фильтр на каждом хендлере, он висит выше.
     for existing_filter in list(root_logger.filters):
         if isinstance(existing_filter, SecretMaskingFilter):
             root_logger.removeFilter(existing_filter)
