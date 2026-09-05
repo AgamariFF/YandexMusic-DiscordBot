@@ -72,10 +72,19 @@ class YandexMusicClient:
         try:
             await client.init()
         except UnauthorizedError as exc:
+            logger.error(
+                "Не удалось авторизоваться в Яндекс.Музыке: %s: %s", type(exc).__name__, exc
+            )
             raise YandexAuthError() from exc
         except YandexMusicError as exc:
+            logger.warning(
+                "Не удалось подключиться к Яндекс.Музыке: %s: %s", type(exc).__name__, exc
+            )
             raise WaveUnavailableError() from exc
         except OSError as exc:
+            logger.warning(
+                "Не удалось подключиться к Яндекс.Музыке: %s: %s", type(exc).__name__, exc
+            )
             raise WaveUnavailableError() from exc
         self._client = client
         logger.info("Подключение к API Яндекс.Музыки установлено")
@@ -91,19 +100,27 @@ class YandexMusicClient:
     async def start_wave(
         self, *, from_: str = DEFAULT_WAVE_FROM, batch_id: str | None = None
     ) -> None:
-        """Сообщает API о старте прослушивания станции волны."""
+        """Уведомляет API о старте прослушивания станции волны.
+
+        Фидбек о старте станции необязателен: сервер может отклонить его
+        (например, ошибкой «condition is not met»), но треки волны при этом
+        всё равно получаются и воспроизводятся, поэтому неудача этого
+        фидбека не считается фатальной и не прерывает запуск волны.
+        Отсутствие подключения к клиенту — самостоятельная ошибка состояния
+        и по-прежнему приводит к `WaveUnavailableError`.
+        """
         client = self._require_client()
         logger.info("Старт станции волны %s", self._station)
         try:
             await client.rotor_station_feedback_radio_started(
                 self._station, from_, batch_id=batch_id
             )
-        except UnauthorizedError as exc:
-            raise YandexAuthError() from exc
-        except YandexMusicError as exc:
-            raise WaveUnavailableError() from exc
-        except OSError as exc:
-            raise WaveUnavailableError() from exc
+        except Exception as exc:
+            logger.warning(
+                "Не удалось отправить фидбек о старте станции волны: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
     async def fetch_wave_batch(self, queue: str | int | None = None) -> WaveBatch:
         """Запрашивает очередную пачку треков волны."""
@@ -111,10 +128,19 @@ class YandexMusicClient:
         try:
             result = await client.rotor_station_tracks(self._station, queue=queue)
         except UnauthorizedError as exc:
+            logger.error(
+                "Не удалось получить пачку треков волны: %s: %s", type(exc).__name__, exc
+            )
             raise YandexAuthError() from exc
         except YandexMusicError as exc:
+            logger.warning(
+                "Не удалось получить пачку треков волны: %s: %s", type(exc).__name__, exc
+            )
             raise WaveUnavailableError() from exc
         except OSError as exc:
+            logger.warning(
+                "Не удалось получить пачку треков волны: %s: %s", type(exc).__name__, exc
+            )
             raise WaveUnavailableError() from exc
 
         if result is None or not result.sequence:
@@ -148,8 +174,13 @@ class YandexMusicClient:
             await client.rotor_station_feedback_track_started(
                 self._station, track_id, batch_id=batch_id
             )
-        except Exception:
-            logger.warning("Не удалось отправить фидбек о старте трека %s", track_id)
+        except Exception as exc:
+            logger.warning(
+                "Не удалось отправить фидбек о старте трека %s: %s: %s",
+                track_id,
+                type(exc).__name__,
+                exc,
+            )
 
     async def notify_track_finished(
         self, track_id: str, played_seconds: float, batch_id: str | None
@@ -160,8 +191,13 @@ class YandexMusicClient:
             await client.rotor_station_feedback_track_finished(
                 self._station, track_id, played_seconds, batch_id=batch_id
             )
-        except Exception:
-            logger.warning("Не удалось отправить фидбек о завершении трека %s", track_id)
+        except Exception as exc:
+            logger.warning(
+                "Не удалось отправить фидбек о завершении трека %s: %s: %s",
+                track_id,
+                type(exc).__name__,
+                exc,
+            )
 
     async def notify_track_skipped(
         self, track_id: str, played_seconds: float, batch_id: str | None
@@ -172,8 +208,13 @@ class YandexMusicClient:
             await client.rotor_station_feedback_skip(
                 self._station, track_id, played_seconds, batch_id=batch_id
             )
-        except Exception:
-            logger.warning("Не удалось отправить фидбек о пропуске трека %s", track_id)
+        except Exception as exc:
+            logger.warning(
+                "Не удалось отправить фидбек о пропуске трека %s: %s: %s",
+                track_id,
+                type(exc).__name__,
+                exc,
+            )
 
     async def resolve_stream_url(self, track: TrackInfo) -> str:
         """Возвращает прямую ссылку на аудиопоток лучшего доступного качества."""
@@ -181,10 +222,28 @@ class YandexMusicClient:
         try:
             infos = await track.raw.get_download_info_async()
         except UnauthorizedError as exc:
+            logger.error(
+                "Не удалось получить ссылку на поток трека %s: %s: %s",
+                track.id,
+                type(exc).__name__,
+                exc,
+            )
             raise YandexAuthError() from exc
         except YandexMusicError as exc:
+            logger.warning(
+                "Не удалось получить ссылку на поток трека %s: %s: %s",
+                track.id,
+                type(exc).__name__,
+                exc,
+            )
             raise TrackUnavailableError() from exc
         except OSError as exc:
+            logger.warning(
+                "Не удалось получить ссылку на поток трека %s: %s: %s",
+                track.id,
+                type(exc).__name__,
+                exc,
+            )
             raise TrackUnavailableError() from exc
 
         candidates = [info for info in infos if not info.preview]
@@ -202,10 +261,28 @@ class YandexMusicClient:
         try:
             return await best.get_direct_link_async()
         except UnauthorizedError as exc:
+            logger.error(
+                "Не удалось получить прямую ссылку на трек %s: %s: %s",
+                track.id,
+                type(exc).__name__,
+                exc,
+            )
             raise YandexAuthError() from exc
         except YandexMusicError as exc:
+            logger.warning(
+                "Не удалось получить прямую ссылку на трек %s: %s: %s",
+                track.id,
+                type(exc).__name__,
+                exc,
+            )
             raise TrackUnavailableError() from exc
         except OSError as exc:
+            logger.warning(
+                "Не удалось получить прямую ссылку на трек %s: %s: %s",
+                track.id,
+                type(exc).__name__,
+                exc,
+            )
             raise TrackUnavailableError() from exc
 
     async def close(self) -> None:

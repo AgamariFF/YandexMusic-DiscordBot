@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yandex_music.exceptions
 
 from bot.errors import TrackUnavailableError, WaveUnavailableError
 from bot.yandex.client import (
@@ -385,3 +386,103 @@ class TestYandexMusicClientClose:
         # Second close should not raise
         await client.close()
         assert client.connected is False
+
+
+class TestYandexMusicClientStartWave:
+    """Tests for start_wave method."""
+
+    @pytest.mark.asyncio
+    async def test_start_wave_survives_feedback_rejection(self):
+        """Server rejects feedback with BadRequestError, but wave still starts.
+
+        Regression test for boevoy bug: when Yandex API rejects the feedback
+        rotor_station_feedback_radio_started with BadRequestError (condition
+        is not met), the wave is still playable, so start_wave() should NOT
+        raise an exception—only log a warning. Wave functionality must not
+        depend on optional feedback success.
+        """
+        mock_client = AsyncMock()
+        mock_client.rotor_station_feedback_radio_started = AsyncMock(
+            side_effect=yandex_music.exceptions.BadRequestError("condition is not met")
+        )
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        # Should not raise despite BadRequestError from feedback
+        await client.start_wave()
+
+    @pytest.mark.asyncio
+    async def test_start_wave_survives_network_error(self):
+        """Network error in feedback does not stop wave startup."""
+        mock_client = AsyncMock()
+        mock_client.rotor_station_feedback_radio_started = AsyncMock(
+            side_effect=yandex_music.exceptions.NetworkError("Connection timeout")
+        )
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        # Should not raise despite NetworkError from feedback
+        await client.start_wave()
+
+    @pytest.mark.asyncio
+    async def test_start_wave_survives_generic_exception(self):
+        """Generic Exception in feedback does not stop wave startup."""
+        mock_client = AsyncMock()
+        mock_client.rotor_station_feedback_radio_started = AsyncMock(
+            side_effect=Exception("Some error")
+        )
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        # Should not raise despite generic exception
+        await client.start_wave()
+
+    @pytest.mark.asyncio
+    async def test_start_wave_without_client_raises_error(self):
+        """start_wave without connect raises WaveUnavailableError.
+
+        Unlike feedback errors, the absence of a client is a state error
+        that must bubble up.
+        """
+        client = YandexMusicClient("token123")
+        # Don't connect - client._client stays None
+
+        with pytest.raises(WaveUnavailableError):
+            await client.start_wave()
+
+    @pytest.mark.asyncio
+    async def test_start_wave_success(self):
+        """Successful feedback: start_wave does not raise and calls feedback method."""
+        mock_client = AsyncMock()
+        mock_client.rotor_station_feedback_radio_started = AsyncMock()
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        await client.start_wave()
+
+        # Verify feedback was called exactly once
+        assert mock_client.rotor_station_feedback_radio_started.call_count == 1
+        # Check it was called with the expected station
+        call_args = mock_client.rotor_station_feedback_radio_started.call_args
+        assert call_args[0][0] == WAVE_STATION_ID
+
+    @pytest.mark.asyncio
+    async def test_start_wave_with_custom_params(self):
+        """start_wave passes from_ and batch_id to feedback call."""
+        mock_client = AsyncMock()
+        mock_client.rotor_station_feedback_radio_started = AsyncMock()
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        await client.start_wave(from_="custom_from", batch_id="custom_batch_id")
+
+        # Verify feedback was called with correct parameters
+        call_args = mock_client.rotor_station_feedback_radio_started.call_args
+        assert call_args[0][0] == WAVE_STATION_ID
+        assert call_args[0][1] == "custom_from"
+        assert call_args[1]["batch_id"] == "custom_batch_id"
