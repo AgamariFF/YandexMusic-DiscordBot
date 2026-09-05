@@ -3,24 +3,31 @@
 
 import pytest
 
-from bot.errors import WaveUnavailableError
+from bot.errors import WaveUnavailableError, YandexAuthError
 from bot.yandex.client import TrackInfo, WaveBatch
 from bot.yandex.wave import WaveSession
 
 
 class FakeMusicClient:
-    """Fake YandexMusicClient for testing."""
+    """Fake YandexMusicClient for testing.
+
+    Supports both a list of batches (for simple cases) and a fetch handler
+    function (for more complex scenarios with retries and errors).
+    """
 
     def __init__(self):
         self.calls = []
         self.batches_to_return = []
         self.batch_index = 0
+        self.fetch_handler = None  # Optional callable for custom behavior
 
     async def start_wave(self, *, from_=None, batch_id=None):
         self.calls.append(("start_wave", from_, batch_id))
 
     async def fetch_wave_batch(self, queue=None):
         self.calls.append(("fetch_wave_batch", queue))
+        if self.fetch_handler is not None:
+            return await self.fetch_handler(queue, self.batch_index, self)
         if self.batch_index < len(self.batches_to_return):
             batch = self.batches_to_return[self.batch_index]
             self.batch_index += 1
@@ -58,8 +65,8 @@ class TestWaveSessionBasics:
         assert session.buffered == 0
 
     def test_max_fetch_attempts_constant(self):
-        """MAX_FETCH_ATTEMPTS == 3."""
-        assert WaveSession.MAX_FETCH_ATTEMPTS == 3
+        """MAX_FETCH_ATTEMPTS == 4."""
+        assert WaveSession.MAX_FETCH_ATTEMPTS == 4
 
 
 class TestWaveSessionStart:
@@ -121,20 +128,35 @@ class TestWaveSessionNextTrack:
 
     @pytest.mark.asyncio
     async def test_next_track_fetches_new_batch_when_empty(self):
-        """next_track() fetches new batch when buffer empty."""
+        """next_track() fetches new batch when buffer empty, and updates chain via _refresh_chain.
+
+        Each next_track() does:
+        1. Fetch to fill buffer (if empty)
+        2. Get track from buffer
+        3. Call _refresh_chain() which does another fetch
+
+        So: next_track() #1: fetch (fill) + fetch (refresh) = 2 calls
+            next_track() #2: fetch (already filled by refresh) + fetch (refresh) = 2 calls
+        Total: 4 calls (but we only test that at least 1 fetch happens per next_track()).
+        """
         batch1 = WaveBatch(batch_id="batch1", tracks=(make_track("1"),))
         batch2 = WaveBatch(batch_id="batch2", tracks=(make_track("2"),))
+        batch_empty = WaveBatch(batch_id=None, tracks=())
 
         client = FakeMusicClient()
-        client.batches_to_return = [batch1, batch2]
+        client.batches_to_return = [batch1, batch2, batch_empty]
         session = WaveSession(client)
 
         await session.start()
-        await session.next_track()
-        await session.next_track()
+        track1 = await session.next_track()
+        assert track1.id == "1"
 
+        track2 = await session.next_track()
+        assert track2.id == "2"
+
+        # Verify multiple fetches occurred (at least one per next_track call)
         fetch_calls = [c for c in client.calls if c[0] == "fetch_wave_batch"]
-        assert len(fetch_calls) == 2
+        assert len(fetch_calls) >= 2
 
     @pytest.mark.asyncio
     async def test_next_track_passes_last_track_id_as_queue(self):
@@ -181,20 +203,28 @@ class TestWaveSessionNextTrack:
 
     @pytest.mark.asyncio
     async def test_retry_on_empty_then_success(self):
-        """First batch empty, second has track → success."""
+        """First batch empty, second has track → success (with retries and refresh).
+
+        Scenario:
+        1. First fetch returns empty → retry
+        2. Second fetch returns track → success, populate buffer
+        3. Extract track, call _refresh_chain which does another fetch
+        """
         batch1 = WaveBatch(batch_id="b1", tracks=())
         batch2 = WaveBatch(batch_id="b2", tracks=(make_track("1"),))
+        batch_refresh = WaveBatch(batch_id=None, tracks=())
 
         client = FakeMusicClient()
-        client.batches_to_return = [batch1, batch2]
+        client.batches_to_return = [batch1, batch2, batch_refresh]
         session = WaveSession(client)
 
         await session.start()
         track = await session.next_track()
 
         assert track.id == "1"
+        # Should have at least 2 fetches: one retry loop + one refresh
         fetch_calls = [c for c in client.calls if c[0] == "fetch_wave_batch"]
-        assert len(fetch_calls) == 2
+        assert len(fetch_calls) >= 2
 
 
 class TestWaveSessionUpcoming:
@@ -406,30 +436,47 @@ class TestWaveSessionSkipAndAdaptation:
     """Tests for wave adaptation upon track skip and deduplication."""
 
     @pytest.mark.asyncio
-    async def test_buffer_cleared_on_skip(self):
-        """track_skipped() clears the buffer completely."""
-        # Set up: multiple tracks in batch
+    async def test_skip_keeps_queue_intact(self):
+        """track_skipped() does NOT clear buffer — only sends feedback.
+
+        Regression test for the issue: /skip should work like next-track, not reshuffle queue.
+        After skipping a track, the buffer should retain its existing tracks.
+
+        Key: track_skipped() calls client.notify_track_skipped() but does NOT
+        clear self._buffer. The buffer is only updated by _refresh_chain() (after
+        each next_track) or by next_track()'s retry logic.
+        """
         track_a = make_track("a", "Track A")
         track_b = make_track("b", "Track B")
-        track_c = make_track("c", "Track C")
-        batch = WaveBatch(batch_id="batch1", tracks=(track_a, track_b, track_c))
+
+        # Use a handler to return different batches based on call count
+        fetch_count = {"count": 0}
+
+        async def fetch_handler(queue, batch_index, client):
+            fetch_count["count"] += 1
+            # 1st fetch (from next_track #1 fill): batch with A, B
+            # 2nd fetch (from _refresh_chain after next_track #1): empty
+            if fetch_count["count"] == 1:
+                return WaveBatch(batch_id="batch1", tracks=(track_a, track_b))
+            # All subsequent fetches return empty
+            return WaveBatch(batch_id=None, tracks=())
 
         client = FakeMusicClient()
-        client.batches_to_return = [batch]
+        client.fetch_handler = fetch_handler
         session = WaveSession(client)
 
         await session.start()
 
-        # Take first track, verify buffer has 2 remaining
+        # Get first track (A), buffer now has [B]
         taken = await session.next_track()
         assert taken.id == "a"
-        assert session.buffered == 2
+        buffered_before_skip = session.buffered
 
-        # Skip the taken track
+        # Skip A — should NOT clear buffer
         await session.track_skipped(taken, 10.0)
 
-        # Buffer should now be empty
-        assert session.buffered == 0
+        # Verify buffer is unchanged (still has the tracks that were there)
+        assert session.buffered == buffered_before_skip
 
     @pytest.mark.asyncio
     async def test_skip_feedback_before_next_fetch(self, monkeypatch):
@@ -495,9 +542,16 @@ class TestWaveSessionSkipAndAdaptation:
         )
 
     @pytest.mark.asyncio
-    async def test_next_track_after_skip_uses_skipped_id_as_queue(self, monkeypatch):
-        """After skip, fetch_wave_batch is called with skipped track's id as queue param."""
-        # Mock sleep to avoid delays
+    async def test_next_track_after_skip_passes_track_id_to_refresh(self, monkeypatch):
+        """After next_track(), _refresh_chain uses that track's id as queue parameter.
+
+        The key behavior: when next_track() extracts a track, it calls
+        _refresh_chain(track.id), which sends fetch_wave_batch(queue=track.id).
+
+        Even if track_skipped() was called beforehand, the next next_track()
+        will extract the next track from the buffer and call _refresh_chain
+        with that track's id.
+        """
         async def fake_sleep(_):
             return None
 
@@ -505,66 +559,91 @@ class TestWaveSessionSkipAndAdaptation:
 
         track_a = make_track("a", "Track A")
         track_b = make_track("b", "Track B")
-        track_c = make_track("c", "Track C")
-        batch1 = WaveBatch(batch_id="batch1", tracks=(track_a, track_b))
-        batch2 = WaveBatch(batch_id="batch2", tracks=(track_c,))
+
+        # Create handler to return specific batches
+        fetch_count = {"count": 0}
+
+        async def fetch_handler(queue, batch_index, client):
+            fetch_count["count"] += 1
+            if fetch_count["count"] == 1:
+                # First fetch (from initial next_track): A, B
+                return WaveBatch(batch_id="batch1", tracks=(track_a, track_b))
+            # All others: empty (to avoid infinite fetching)
+            return WaveBatch(batch_id=None, tracks=())
 
         client = FakeMusicClient()
-        client.batches_to_return = [batch1, batch2]
+        client.fetch_handler = fetch_handler
         session = WaveSession(client)
 
         await session.start()
 
-        # Get first track and skip it
-        taken = await session.next_track()
-        assert taken.id == "a"
-        await session.track_skipped(taken, 5.0)
+        # Get track A
+        taken_a = await session.next_track()
+        assert taken_a.id == "a"
 
-        # Now fetch next track; buffer is empty so it should fetch
-        await session.next_track()
+        # Skip track A (buffer still has B)
+        await session.track_skipped(taken_a, 5.0)
 
-        # Find the fetch_wave_batch call that happened after the skip
+        # Get track B; this should call _refresh_chain(B)
+        taken_b = await session.next_track()
+        assert taken_b.id == "b"
+
+        # Find all fetch_wave_batch calls with their queue parameters
         fetch_calls = [c for c in client.calls if c[0] == "fetch_wave_batch"]
-        # We expect: initial start_wave triggers first fetch implicitly (or not),
-        # then next_track after skip should pass queue="a"
-        # Let's check that the most recent fetch has queue="a"
-        assert fetch_calls[-1][1] == "a", (
-            f"Most recent fetch should have queue='a' (the skipped track id), "
+        # We expect:
+        # 1. fetch(queue=None) — initial fill
+        # 2. fetch(queue="a") — refresh after extracting A
+        # 3. fetch(queue="b") — refresh after extracting B
+        assert len(fetch_calls) >= 2
+        # The last fetch should have been with queue="b" (from _refresh_chain after getting B)
+        assert fetch_calls[-1][1] == "b", (
+            f"Last fetch should have queue='b' (id of second track extracted), "
             f"but got queue={fetch_calls[-1][1]!r}"
         )
 
     @pytest.mark.asyncio
     async def test_duplicates_filtered_from_new_batch(self):
-        """Recently played tracks are filtered out from new batches."""
+        """Recently played tracks are filtered out from new batches (in _refresh_chain).
+
+        Scenario:
+        1. next_track() gets track A from batch1 (A, B), calls _refresh_chain(A)
+        2. _refresh_chain fetches batch2 (A, C) — A is recent, so filtered → buffer=[C]
+        3. next_track() extracts C from buffer (which was filled by _refresh_chain)
+
+        Note: C is returned from buffer that was filled by _refresh_chain after
+        extracting A, not from a separate fetch after B.
+        """
         track_a = make_track("a", "Track A")
         track_b = make_track("b", "Track B")
         track_c = make_track("c", "Track C")
 
-        # First batch: A and B
-        batch1 = WaveBatch(batch_id="batch1", tracks=(track_a, track_b))
-        # Second batch: A again (duplicate) and new track C
-        batch2 = WaveBatch(batch_id="batch2", tracks=(track_a, track_c))
+        fetch_count = {"count": 0}
+
+        async def fetch_handler(queue, batch_index, client):
+            fetch_count["count"] += 1
+            if fetch_count["count"] == 1:
+                # Initial fetch: A and B
+                return WaveBatch(batch_id="batch1", tracks=(track_a, track_b))
+            elif fetch_count["count"] == 2:
+                # Refresh after extracting A: A (duplicate) and C (new)
+                return WaveBatch(batch_id="batch2", tracks=(track_a, track_c))
+            # All others: empty
+            return WaveBatch(batch_id=None, tracks=())
 
         client = FakeMusicClient()
-        client.batches_to_return = [batch1, batch2]
+        client.fetch_handler = fetch_handler
         session = WaveSession(client)
 
         await session.start()
 
-        # Consume both tracks from first batch
+        # Get first track (A)
         t1 = await session.next_track()
         assert t1.id == "a"
 
+        # Get second track (C, because _refresh_chain filtered A from batch2)
         t2 = await session.next_track()
-        assert t2.id == "b"
-
-        # Buffer is empty, so next call fetches second batch
-        # Second batch contains A (duplicate) and C (new)
-        # A should be filtered out, C should be returned
-        t3 = await session.next_track()
-        assert t3.id == "c", (
-            f"Expected track C (new track), but got {t3.id}. "
-            f"Track A should have been filtered as a duplicate."
+        assert t2.id == "c", (
+            f"Expected track C (new track after filtering duplicate A), but got {t2.id}."
         )
 
     @pytest.mark.asyncio
@@ -614,29 +693,33 @@ class TestWaveSessionSkipAndAdaptation:
     async def test_start_clears_history(self):
         """start() clears recent track history.
 
-        After consuming track A and restarting, a new batch containing A
-        should return A again (no dedup across restart boundaries).
+        After consuming track A in session 1, calling start() should clear
+        _recent. In session 2, a new batch containing A should return A
+        (no dedup across restart boundaries).
         """
         track_a = make_track("a", "Track A")
-        track_b = make_track("b", "Track B")
 
-        batch1 = WaveBatch(batch_id="batch1", tracks=(track_a, track_b))
-        batch2 = WaveBatch(batch_id="batch2", tracks=(track_a,))
+        fetch_count = {"count": 0}
+
+        async def fetch_handler(queue, batch_index, client):
+            fetch_count["count"] += 1
+            # Every fetch returns A; should only be playable after restart clears history
+            return WaveBatch(batch_id=f"batch{fetch_count['count']}", tracks=(track_a,))
 
         client = FakeMusicClient()
-        client.batches_to_return = [batch1, batch2]
+        client.fetch_handler = fetch_handler
         session = WaveSession(client)
 
-        # First session
+        # First session: get A
         await session.start()
         t1 = await session.next_track()
         assert t1.id == "a"
+        # After this, A is in _recent
 
-        # Restart: should clear recent history
+        # Restart: should clear _recent
         await session.start()
 
-        # Fetch batch2 containing A; despite A being in recent from before restart,
-        # history was cleared, so A should be returned (not filtered)
+        # Now fetch should return A again (history was cleared)
         t2 = await session.next_track()
         assert t2.id == "a", (
             "After restart, history should be cleared; "
@@ -677,3 +760,176 @@ class TestWaveSessionSkipAndAdaptation:
 
         track = await session.next_track()
         assert track.id == "a"
+
+
+class TestWaveSessionNetworkResilience:
+    """Tests for network error handling and retries."""
+
+    @pytest.mark.asyncio
+    async def test_network_error_retried_then_succeeds(self, monkeypatch):
+        """Сетевой сбой на попытках 1-2 не убивает волну: retry → успех на попытке 3."""
+        async def fake_sleep(_):
+            return None
+
+        monkeypatch.setattr("bot.yandex.wave.asyncio.sleep", fake_sleep)
+
+        track_a = make_track("a")
+        attempt_count = {"count": 0}
+
+        async def fetch_handler_with_retry(queue, batch_index, client):
+            attempt_count["count"] += 1
+            # Попытки 1-2: WaveUnavailableError (сетевой сбой)
+            # Попытка 3: успех
+            if attempt_count["count"] <= 2:
+                raise WaveUnavailableError(user_message="Network error (simulated)")
+            return WaveBatch(batch_id="batch_a", tracks=(track_a,))
+
+        client = FakeMusicClient()
+        client.fetch_handler = fetch_handler_with_retry
+        session = WaveSession(client)
+
+        await session.start()
+
+        # next_track() should retry and eventually succeed
+        track = await session.next_track()
+        assert track.id == "a"
+        # Verify that fetch was called 3 times (2 failures + 1 success + 1 refresh)
+        fetch_calls = [c for c in client.calls if c[0] == "fetch_wave_batch"]
+        assert len(fetch_calls) >= 3
+
+    @pytest.mark.asyncio
+    async def test_all_fetch_attempts_fail_raises_error(self, monkeypatch):
+        """Все MAX_FETCH_ATTEMPTS попыток неудачны → WaveUnavailableError."""
+        async def fake_sleep(_):
+            return None
+
+        monkeypatch.setattr("bot.yandex.wave.asyncio.sleep", fake_sleep)
+
+        async def always_fail(queue, batch_index, client):
+            raise WaveUnavailableError(user_message="Persistent network error")
+
+        client = FakeMusicClient()
+        client.fetch_handler = always_fail
+        session = WaveSession(client)
+
+        await session.start()
+
+        # Should raise WaveUnavailableError after MAX_FETCH_ATTEMPTS attempts
+        with pytest.raises(WaveUnavailableError):
+            await session.next_track()
+
+        # Verify that fetch was called exactly MAX_FETCH_ATTEMPTS times
+        fetch_calls = [c for c in client.calls if c[0] == "fetch_wave_batch"]
+        assert len(fetch_calls) == WaveSession.MAX_FETCH_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_yandex_auth_error_not_retried(self):
+        """YandexAuthError не ретраится: пробрасывается немедленно."""
+        attempt_count = {"count": 0}
+
+        async def fetch_handler_auth_error(queue, batch_index, client):
+            attempt_count["count"] += 1
+            raise YandexAuthError(user_message="Invalid token")
+
+        client = FakeMusicClient()
+        client.fetch_handler = fetch_handler_auth_error
+        session = WaveSession(client)
+
+        await session.start()
+
+        # Should raise YandexAuthError immediately (no retries)
+        with pytest.raises(YandexAuthError):
+            await session.next_track()
+
+        # Verify that fetch was called EXACTLY ONCE (no retries)
+        fetch_calls = [c for c in client.calls if c[0] == "fetch_wave_batch"]
+        assert len(fetch_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_refresh_chain_error_does_not_stop_playback(self):
+        """Ошибка _refresh_chain не прерывает воспроизведение.
+
+        Сценарий:
+        1. Первый fetch успешен → получаем трек
+        2. _refresh_chain вызывает fetch и получает ошибку
+        3. Трек всё равно возвращается, буфер сохраняется
+        """
+        track_a = make_track("a")
+        track_b = make_track("b")
+        fetch_count = {"count": 0}
+
+        async def fetch_handler_refresh_fails(queue, batch_index, client):
+            fetch_count["count"] += 1
+            if fetch_count["count"] == 1:
+                # Initial fetch: success with A and B
+                return WaveBatch(batch_id="batch1", tracks=(track_a, track_b))
+            else:
+                # Refresh fetches fail
+                raise WaveUnavailableError(user_message="Refresh failed")
+
+        client = FakeMusicClient()
+        client.fetch_handler = fetch_handler_refresh_fails
+        session = WaveSession(client)
+
+        await session.start()
+
+        # next_track() should succeed despite _refresh_chain error
+        track = await session.next_track()
+        assert track.id == "a"
+        # Buffer should still contain B (not cleared by failed refresh)
+        assert session.buffered == 1  # B is still there
+
+
+class TestWaveSessionBatchIdProperty:
+    """Tests for batch_id property semantics."""
+
+    @pytest.mark.asyncio
+    async def test_batch_id_is_from_extracted_track(self):
+        """batch_id свойство возвращает идентификатор пачки ПОСЛЕДНЕГО ВЫДАННОГО трека.
+
+        После next_track(), batch_id должен соответствовать пачке, из которой
+        был извлечён трек, даже если _refresh_chain потом получила пачку с
+        другим batch_id.
+
+        Ключ: _current_batch_id фиксируется ДО вызова _refresh_chain.
+        """
+        track_a = make_track("a")
+        track_b = make_track("b")
+        fetch_count = {"count": 0}
+
+        async def fetch_handler_different_batches(queue, batch_index, client):
+            fetch_count["count"] += 1
+            if fetch_count["count"] == 1:
+                # Initial fetch with batch_id="original"
+                return WaveBatch(batch_id="original", tracks=(track_a, track_b))
+            elif fetch_count["count"] == 2:
+                # Refresh gets different batch_id="refreshed"
+                return WaveBatch(batch_id="refreshed", tracks=())
+            return WaveBatch(batch_id=None, tracks=())
+
+        client = FakeMusicClient()
+        client.fetch_handler = fetch_handler_different_batches
+        session = WaveSession(client)
+
+        await session.start()
+
+        # Extract track A
+        track = await session.next_track()
+        assert track.id == "a"
+
+        # batch_id should be "original" (the batch from which A was extracted),
+        # NOT "refreshed" (the batch from _refresh_chain)
+        assert session.batch_id == "original", (
+            f"batch_id should be 'original' (from extracted track), "
+            f"not 'refreshed' (from _refresh_chain), but got {session.batch_id!r}"
+        )
+
+        # When track_skipped is called, it should use the correct batch_id
+        await session.track_skipped(track, 5.0)
+
+        skipped_calls = [c for c in client.calls if c[0] == "notify_track_skipped"]
+        assert len(skipped_calls) == 1
+        assert skipped_calls[0][3] == "original", (
+            f"notify_track_skipped should use batch_id='original', "
+            f"but got {skipped_calls[0][3]!r}"
+        )

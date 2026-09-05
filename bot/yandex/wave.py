@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections import deque
 
-from bot.errors import WaveUnavailableError
+from bot.errors import BotError, WaveUnavailableError
 from bot.yandex.client import TrackInfo, YandexMusicClient
 
 logger = logging.getLogger(__name__)
@@ -15,16 +15,19 @@ RECENT_TRACKS_MEMORY = 50
 
 
 class WaveSession:
-    """Сессия «Моей волны»: буферизует треки пачками и отправляет фидбек.
+    """Сессия «Моей волны»: буферизует треки цепочкой и отправляет фидбек.
 
-    При пропуске трека буфер сбрасывается, и следующая пачка запрашивается
-    заново с учётом отправленного фидбека — так волна подстраивается под
-    пропуски, как в оригинальном приложении. Последние `RECENT_TRACKS_MEMORY`
-    выданных треков запоминаются и отфильтровываются из новых пачек, чтобы
-    волна не повторяла недавно сыгранное.
+    Пропуск трека НЕ пересобирает очередь: следующий трек по-прежнему берётся
+    из уже полученной цепочки буфера — ровно тот, что показывался в `/queue`.
+    Вместо пересборки, после выдачи каждого трека «хвост» цепочки обновляется
+    отдельным запросом (`_refresh_chain`) с учётом отправленного по этому
+    треку фидбека (в том числе skip) — так волна подстраивается под вкус
+    пользователя, не выбрасывая уже показанный следующий трек. Последние
+    `RECENT_TRACKS_MEMORY` выданных треков запоминаются и отфильтровываются
+    из новых пачек, чтобы волна не повторяла недавно сыгранное.
     """
 
-    MAX_FETCH_ATTEMPTS = 3
+    MAX_FETCH_ATTEMPTS = 4
     RETRY_DELAY_SECONDS = 1.0
 
     def __init__(self, client: YandexMusicClient) -> None:
@@ -32,6 +35,7 @@ class WaveSession:
         self._client = client
         self._buffer: deque[TrackInfo] = deque()
         self._batch_id: str | None = None
+        self._current_batch_id: str | None = None
         self._last_track_id: str | None = None
         self._recent: deque[str] = deque(maxlen=RECENT_TRACKS_MEMORY)
         self._started = False
@@ -48,14 +52,19 @@ class WaveSession:
 
     @property
     def batch_id(self) -> str | None:
-        """Идентификатор текущей пачки треков."""
-        return self._batch_id
+        """Идентификатор пачки, к которой относится последний выданный трек.
+
+        Именно с ним уходит фидбек по треку. Цепочка в буфере обновляется
+        отдельно и может уже иметь другой идентификатор.
+        """
+        return self._current_batch_id if self._current_batch_id is not None else self._batch_id
 
     async def start(self) -> None:
         """Запускает (или перезапускает) станцию волны и сбрасывает буфер."""
         await self._client.start_wave()
         self._buffer.clear()
         self._batch_id = None
+        self._current_batch_id = None
         self._last_track_id = None
         self._recent.clear()
         self._started = True
@@ -74,8 +83,18 @@ class WaveSession:
 
             for attempt in range(1, self.MAX_FETCH_ATTEMPTS + 1):
                 logger.debug("Попытка %d получить пачку треков волны", attempt)
-                batch = await self._client.fetch_wave_batch(queue=self._last_track_id)
-                if batch.tracks:
+                try:
+                    batch = await self._client.fetch_wave_batch(queue=self._last_track_id)
+                except WaveUnavailableError as exc:
+                    logger.warning(
+                        "Попытка %d получить пачку треков волны не удалась: %s: %s",
+                        attempt,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    batch = None
+
+                if batch is not None and batch.tracks:
                     fresh = tuple(t for t in batch.tracks if t.id not in self._recent)
                     if fresh:
                         repeats = len(batch.tracks) - len(fresh)
@@ -87,7 +106,7 @@ class WaveSession:
                     repeats_only = batch.tracks
                     repeats_only_batch_id = batch.batch_id
                 if attempt < self.MAX_FETCH_ATTEMPTS:
-                    await asyncio.sleep(self.RETRY_DELAY_SECONDS)
+                    await asyncio.sleep(self.RETRY_DELAY_SECONDS * 2 ** (attempt - 1))
 
             if not self._buffer and repeats_only:
                 # Свежих треков волна не дала: лучше повтор, чем тишина.
@@ -106,6 +125,10 @@ class WaveSession:
         track = self._buffer.popleft()
         self._last_track_id = track.id
         self._recent.append(track.id)
+        # Фидбек по этому треку должен уйти с batch_id той цепочки, из которой
+        # он взят, поэтому фиксируем его ДО обновления цепочки ниже.
+        self._current_batch_id = self._batch_id
+        await self._refresh_chain(track.id)
         return track
 
     def upcoming(self, limit: int = 5) -> list[TrackInfo]:
@@ -116,31 +139,67 @@ class WaveSession:
 
     async def track_started(self, track: TrackInfo) -> None:
         """Сообщает о начале воспроизведения трека."""
-        await self._client.notify_track_started(track.id, self._batch_id)
+        await self._client.notify_track_started(track.id, self.batch_id)
 
     async def track_finished(self, track: TrackInfo, played_seconds: float) -> None:
         """Сообщает о завершении воспроизведения трека."""
         await self._client.notify_track_finished(
-            track.id, self._normalize_played_seconds(played_seconds), self._batch_id
+            track.id, self._normalize_played_seconds(played_seconds), self.batch_id
         )
 
     async def track_skipped(self, track: TrackInfo, played_seconds: float) -> None:
-        """Сообщает о пропуске трека и сбрасывает буфер, чтобы волна подстроилась.
+        """Сообщает о пропуске трека.
 
-        Порядок важен: сначала уходит фидбек, и только затем очищается буфер.
-        Следующий `next_track()` запросит свежую пачку с `queue` = id
-        пропущенного трека, поэтому сервер перестроит волну уже с учётом
-        пропуска — так же, как оригинальное приложение.
+        Пропуск НЕ пересобирает очередь: следующий трек по-прежнему берётся
+        из текущей цепочки буфера — того же, что уже показывался в
+        `/queue`. Обновление хвоста цепочки с учётом этого фидбека
+        произойдёт отдельно, в `_refresh_chain`, при выдаче следующего
+        трека через `next_track()`.
         """
         await self._client.notify_track_skipped(
-            track.id, self._normalize_played_seconds(played_seconds), self._batch_id
+            track.id, self._normalize_played_seconds(played_seconds), self.batch_id
         )
-        discarded = len(self._buffer)
+
+    async def _refresh_chain(self, after_track_id: str) -> None:
+        """Обновляет хвост цепочки буфера после выдачи трека `after_track_id`.
+
+        Согласно протоколу rotor, после отправки фидбека по переданному
+        треку следующий запрос `station/tracks` с `queue` = id этого трека
+        либо сдвигает цепочку на один элемент, либо возвращает новые
+        треки — и то и другое учитывает уже отправленный фидбек (включая
+        пропуск). Полученная цепочка ЗАМЕНЯЕТ текущий буфер; сам
+        `after_track_id` в буфер не возвращается, так как он уже попал в
+        `_recent` и будет отфильтрован наравне с прочими недавними треками.
+
+        Ретраев здесь нет: обновление цепочки — это подстройка на будущее,
+        а не выдача трека прямо сейчас, поэтому любая ошибка (`BotError`,
+        включая `WaveUnavailableError` и `YandexAuthError`) просто
+        логируется на уровне warning и оставляет буфер прежним —
+        воспроизведение не должно прерываться из-за неудачного обновления.
+        """
+        try:
+            batch = await self._client.fetch_wave_batch(queue=after_track_id)
+        except BotError as exc:
+            logger.warning(
+                "Не удалось обновить цепочку «Моей волны»: %s: %s", type(exc).__name__, exc
+            )
+            return
+
+        if not batch.tracks:
+            logger.debug("Обновление цепочки «Моей волны» вернуло пустой ответ, буфер не изменён")
+            return
+
+        fresh = tuple(t for t in batch.tracks if t.id not in self._recent)
+        if not fresh:
+            logger.debug(
+                "Обновление цепочки «Моей волны» вернуло только недавние треки, буфер не изменён"
+            )
+            return
+
         self._buffer.clear()
-        logger.info(
-            "Буфер «Моей волны» сброшен после пропуска трека (отброшено %d треков)",
-            discarded,
-        )
+        self._buffer.extend(fresh)
+        self._batch_id = batch.batch_id
+        logger.debug("Цепочка «Моей волны» обновлена, в буфере %d треков", len(self._buffer))
 
     @staticmethod
     def _normalize_played_seconds(played_seconds: float) -> float:
