@@ -67,6 +67,11 @@ class WaveSession:
             raise WaveUnavailableError(user_message="«Моя волна» не запущена.")
 
         if not self._buffer:
+            # Последняя непустая пачка, состоящая из одних повторов: запасной
+            # вариант на случай, если свежих треков так и не найдётся.
+            repeats_only: tuple[TrackInfo, ...] = ()
+            repeats_only_batch_id: str | None = None
+
             for attempt in range(1, self.MAX_FETCH_ATTEMPTS + 1):
                 logger.debug("Попытка %d получить пачку треков волны", attempt)
                 batch = await self._client.fetch_wave_batch(queue=self._last_track_id)
@@ -79,17 +84,20 @@ class WaveSession:
                         self._batch_id = batch.batch_id
                         self._buffer.extend(fresh)
                         break
-                    if attempt == self.MAX_FETCH_ATTEMPTS:
-                        # Все треки пачки уже игрались: лучше повтор, чем тишина.
-                        logger.info(
-                            "Волна вернула только недавно игравшие треки, "
-                            "проигрываем их повторно, чтобы не прерывать музыку"
-                        )
-                        self._batch_id = batch.batch_id
-                        self._buffer.extend(batch.tracks)
-                        break
+                    repeats_only = batch.tracks
+                    repeats_only_batch_id = batch.batch_id
                 if attempt < self.MAX_FETCH_ATTEMPTS:
                     await asyncio.sleep(self.RETRY_DELAY_SECONDS)
+
+            if not self._buffer and repeats_only:
+                # Свежих треков волна не дала: лучше повтор, чем тишина.
+                logger.info(
+                    "Волна вернула только недавно игравшие треки, "
+                    "проигрываем их повторно, чтобы не прерывать музыку"
+                )
+                self._batch_id = repeats_only_batch_id
+                self._buffer.extend(repeats_only)
+
             if not self._buffer:
                 raise WaveUnavailableError(
                     user_message="Не удалось получить треки «Моей волны». Попробуйте позже."

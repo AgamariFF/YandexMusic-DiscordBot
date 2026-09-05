@@ -154,8 +154,14 @@ class TestWaveSessionNextTrack:
         assert fetch_calls[1][1] == "1"  # queue should be previous track_id
 
     @pytest.mark.asyncio
-    async def test_all_empty_batches_raise_error(self):
+    async def test_all_empty_batches_raise_error(self, monkeypatch):
         """All empty batches → WaveUnavailableError."""
+
+        async def fake_sleep(_):
+            return None
+
+        monkeypatch.setattr("bot.yandex.wave.asyncio.sleep", fake_sleep)
+
         client = FakeMusicClient()
         client.batches_to_return = [
             WaveBatch(batch_id="b1", tracks=()),
@@ -426,7 +432,7 @@ class TestWaveSessionSkipAndAdaptation:
         assert session.buffered == 0
 
     @pytest.mark.asyncio
-    async def test_skip_feedback_before_buffer_clear(self, monkeypatch):
+    async def test_skip_feedback_before_next_fetch(self, monkeypatch):
         """Feedback notify_track_skipped is sent BEFORE subsequent fetch.
 
         When track_skipped() is called, it sends feedback first, then clears
@@ -638,25 +644,36 @@ class TestWaveSessionSkipAndAdaptation:
         )
 
     @pytest.mark.asyncio
-    async def test_empty_batches_still_raise_error(self):
-        """Completely empty batches (no tracks at all) still raise WaveUnavailableError.
+    async def test_duplicates_then_empty_batch_still_plays(self, monkeypatch):
+        """Повторы на ранних попытках не теряются, если последняя пачка пустая.
 
-        This is distinct from batches containing only duplicates.
-        Empty batch is a network/service failure, not a dedup issue.
+        Сценарий: попытки 1-2 возвращают непустые пачки, состоящие только из
+        уже игравших треков, а попытка 3 приходит пустой. Играбельные треки
+        были получены, поэтому музыка обязана продолжиться повтором, а не
+        умереть с WaveUnavailableError.
         """
+
+        async def fake_sleep(_):
+            return None
+
+        monkeypatch.setattr("bot.yandex.wave.asyncio.sleep", fake_sleep)
+
+        track_a = make_track("a")
         client = FakeMusicClient()
-        client.batches_to_return = [
-            WaveBatch(batch_id="b1", tracks=()),
-            WaveBatch(batch_id="b2", tracks=()),
-            WaveBatch(batch_id="b3", tracks=()),
-        ]
+        client.batches_to_return = [WaveBatch(batch_id="b0", tracks=(track_a,))]
         session = WaveSession(client)
 
         await session.start()
+        played = await session.next_track()
+        assert played.id == "a"
 
-        with pytest.raises(WaveUnavailableError):
-            await session.next_track()
+        # Дальше волна отдаёт только повтор, а затем пустую пачку.
+        client.batches_to_return = [
+            WaveBatch(batch_id="b1", tracks=(track_a,)),
+            WaveBatch(batch_id="b2", tracks=(track_a,)),
+            WaveBatch(batch_id="b3", tracks=()),
+        ]
+        client.batch_index = 0
 
-        # Should have tried MAX_FETCH_ATTEMPTS times
-        fetch_calls = [c for c in client.calls if c[0] == "fetch_wave_batch"]
-        assert len(fetch_calls) == WaveSession.MAX_FETCH_ATTEMPTS
+        track = await session.next_track()
+        assert track.id == "a"
