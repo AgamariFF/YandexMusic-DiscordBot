@@ -16,18 +16,26 @@ logger = logging.getLogger(__name__)
 
 WAVE_STATION_ID = "user:onyourwave"
 
-# Значение поля `from`, которое официальное приложение передаёт в каждом
-# фидбеке (у него это, например, `desktop-wave_landing_screen-my_wave-radio-
-# default`, проверено дампом трафика). Бот — не десктопное приложение
-# Яндекса, и притворяться им незачем; достаточно узнаваемой и стабильной
-# строки, честно отражающей, что фидбек шлёт именно наш клиент.
-FEEDBACK_FROM = "discord-bot-my_wave-radio-default"
+# Значение поля `from` — перечислимая метка контекста запуска, а не
+# свободный текст: сервер, судя по всему, её разбирает и учитывает при
+# подборе (иначе незачем было бы вообще передавать). Проверить со стороны
+# клиента, какие значения сервер понимает, а какие молча относит к
+# «неопознанному источнику», нельзя — тело ответа не различается, везде
+# `200`. Поэтому здесь ровно та же строка, что шлёт официальное приложение
+# (проверено дампом трафика), а не собственная выдумка: если бы фидбек с
+# посторонним `from` тихо не учитывался при подборе волны, это была бы ровно
+# та невидимая снаружи поломка, ради починки которой затевался весь этот
+# инкремент.
+FEEDBACK_FROM = "desktop-wave_landing_screen-my_wave-radio-default"
 
 # Полный список типов фидбека шире (см. docs/rotor-session-api.md), но `like`
 # и `dislike` сюда сознательно не включены: бот работает на общем сервере с
 # одним аккаунтом Яндекса, и такая оценка осела бы в личной коллекции
-# владельца токена, а не отражала бы вкус конкретного слушателя.
-FeedbackType = Literal["radioStarted", "trackStarted", "trackFinished", "skip"]
+# владельца токена, а не отражала бы вкус конкретного слушателя. `radioStarted`
+# тоже сюда не входит: у него особая форма (`from` дублируется внутри `event`,
+# `batchId` не передаётся вовсе), и собирает его отдельная функция
+# `build_radio_started_feedback`, а не `build_feedback`.
+FeedbackType = Literal["trackStarted", "trackFinished", "skip"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +107,11 @@ def build_feedback(
     ожидает уже готовый составной идентификатор (`TrackInfo.feedback_id`,
     `<id трека>:<id альбома>`), а не голый `TrackInfo.id`, — именно в таком
     виде сервер хочет видеть `trackId` (проверено дампом трафика).
+
+    `radioStarted` этой функцией не собрать: `FeedbackType` его не включает
+    намеренно, потому что у него другая форма (`from` дублируется внутри
+    `event`, `batchId` не передаётся вовсе) — для него есть отдельная
+    `build_radio_started_feedback`.
     """
     event: dict[str, Any] = {"type": type_, "timestamp": _now_iso()}
     if track_id is not None:
@@ -238,13 +251,15 @@ class YandexMusicClient:
             raise WaveUnavailableError()
         self._radio_session_id = session_id
 
-        # Официальное приложение шлёт `radioStarted` отдельным запросом сразу
-        # после `session/new` (проверено дампом трафика) — воспроизводим это
-        # поведение. Неудача этого фидбека не должна ломать запуск волны:
-        # `send_feedbacks` уже проглатывает такие ошибки через
+        # Официальное приложение шлёт `radioStarted` отдельным запросом на
+        # `.../feedback/` (в единственном числе) сразу после `session/new`, а
+        # не пачкой на `.../feedbacks/` (проверено дампом трафика) —
+        # воспроизводим это поведение через `send_feedback`, а не
+        # `send_feedbacks`. Неудача этого фидбека не должна ломать запуск
+        # волны: `send_feedback` проглатывает такие ошибки через
         # `_log_feedback_failure`, сессия и первая пачка треков к этому
         # моменту уже получены.
-        await self.send_feedbacks([build_radio_started_feedback()])
+        await self.send_feedback(build_radio_started_feedback())
 
         batch = self._parse_batch(raw, client)
         logger.info("Сессия «Моей волны» создана, треков в первой пачке: %d", len(batch.tracks))
@@ -312,6 +327,29 @@ class YandexMusicClient:
             await client.request.post(url, json={"feedbacks": feedbacks})
         except Exception as exc:
             self._log_feedback_failure("отправка фидбеков волны", exc)
+
+    async def send_feedback(self, feedback: dict[str, Any]) -> None:
+        """Отправляет один фидбек одиночным запросом на `.../feedback/` (без обёртки списком).
+
+        Это отдельный от `send_feedbacks` маршрут — единственное число в
+        пути, тело запроса это сам объект фидбека, а не `{"feedbacks": [...]}`
+        вокруг списка. Нужен ровно для одного случая: `radioStarted`, который
+        официальное приложение шлёт именно так, отдельным запросом сразу
+        после `session/new` (проверено дампом трафика), а не пачкой вместе с
+        другими фидбеками. Как и `send_feedbacks`, неудача не должна мешать
+        запуску волны, поэтому ошибка не пробрасывается наружу, а логируется
+        через `_log_feedback_failure`.
+        """
+        try:
+            client = self._require_client()
+            session_id = self._require_session()
+            # Завершающий слэш обязателен по той же причине, что и у
+            # `.../feedbacks/` в `send_feedbacks`: без него сервер обрывает
+            # TCP-соединение вместо ответа 404 (проверено вживую).
+            url = f"{client.base_url}/rotor/session/{session_id}/feedback/"
+            await client.request.post(url, json=feedback)
+        except Exception as exc:
+            self._log_feedback_failure("отправка фидбека волны", exc)
 
     def _parse_batch(self, raw: dict[str, Any] | None, client: ClientAsync) -> WaveBatch:
         """Разбирает ответ сессионного rotor (`session/new` или `.../tracks`) в WaveBatch.
