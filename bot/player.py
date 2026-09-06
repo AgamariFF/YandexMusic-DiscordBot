@@ -144,6 +144,11 @@ class GuildPlayer:
         async with self._lock:
             await self._cancel_idle_timer_locked()
             self._stop_playback_locked()
+            if self._session is not None:
+                # Сессия ещё жива — досылаем фидбек (например, trackStarted
+                # по играющему треку) до того, как `_stop_locked_state`
+                # выбросит объект вместе с его очередью.
+                await self._session.flush_pending_feedbacks()
             self._stop_locked_state()
             self._consecutive_failures = 0
             if self._voice_client is not None:
@@ -162,6 +167,15 @@ class GuildPlayer:
 
             if self._current_track is not None:
                 await self._interrupt_current_track_locked()
+
+            # Сбрасываем фидбек СТАРОЙ сессии, пока она ещё жива (её
+            # radioSessionId ещё действителен): как только `self._session`
+            # ниже будет заменён новым объектом, добраться до очереди
+            # старой сессии станет негде. Порядок принципиален: это должно
+            # произойти ПОСЛЕ `_interrupt_current_track_locked` (иначе skip
+            # ещё не попал в очередь) и ДО создания нового `WaveSession`.
+            if self._session is not None:
+                await self._session.flush_pending_feedbacks()
 
             session = WaveSession(self._client)
             await session.start()
@@ -416,7 +430,18 @@ class GuildPlayer:
             self._voice_client.stop()
 
     def _stop_locked_state(self) -> None:
-        """Сбрасывает состояние воспроизведения и волну, не трогая голосовое соединение."""
+        """Сбрасывает состояние воспроизведения и волну, не трогая голосовое соединение.
+
+        Этот метод выбрасывает `self._session` вместе с её очередью
+        неотправленного фидбека, поэтому вызывающий код, у которого сессия
+        ещё исправна, обязан сам вызвать `flush_pending_feedbacks()` до
+        этого вызова (так делает `disconnect()`). Вызовы на путях обработки
+        ошибок воспроизведения (в `_advance_locked` и `set_bass`)
+        сознательно этого не делают: туда попадают, когда сеть или токен
+        уже не работают и волна и так останавливается, — попытка досылки
+        фидбека в такой момент ничего не даст, и пропуск здесь не
+        забывчивость.
+        """
         self._current_track = None
         self._source = None
         self._session = None
