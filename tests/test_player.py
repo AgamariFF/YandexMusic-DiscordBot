@@ -2,10 +2,11 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 
 from bot.audio.bassboost import BassLevel
-from bot.errors import BotError, NotConnectedError, NothingPlayingError
+from bot.errors import BotError, NotConnectedError, NothingPlayingError, VoiceConnectError
 from bot.player import GuildPlayer, PlayerState
 from bot.yandex.client import TrackInfo
 
@@ -191,6 +192,67 @@ class TestPlayerDisconnect:
         """disconnect() called twice doesn't raise."""
         await player.disconnect()
         await player.disconnect()
+
+
+class TestPlayerConnect:
+    """Tests for connect() method."""
+
+    @pytest.mark.asyncio
+    async def test_connect_timeout_raises_voice_connect_error(self, player):
+        """connect() converting TimeoutError to VoiceConnectError."""
+        channel = MagicMock()
+        channel.id = 12345
+        channel.connect = AsyncMock(side_effect=TimeoutError("Connection timed out"))
+
+        with pytest.raises(VoiceConnectError) as exc_info:
+            await player.connect(channel)
+
+        assert "12345" in str(exc_info.value)
+        assert "Connection timed out" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_connect_client_exception_raises_voice_connect_error(self, player):
+        """connect() converting discord.ClientException to VoiceConnectError."""
+        channel = MagicMock()
+        channel.id = 12345
+        channel.connect = AsyncMock(side_effect=discord.ClientException("Client error occurred"))
+
+        with pytest.raises(VoiceConnectError) as exc_info:
+            await player.connect(channel)
+
+        assert "12345" in str(exc_info.value)
+        assert "Client error occurred" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_connect_opus_not_loaded_raises_voice_connect_error(self, player):
+        """connect() converting discord.opus.OpusNotLoaded to VoiceConnectError."""
+        channel = MagicMock()
+        channel.id = 12345
+        channel.connect = AsyncMock(side_effect=discord.opus.OpusNotLoaded())
+
+        with pytest.raises(VoiceConnectError) as exc_info:
+            await player.connect(channel)
+
+        assert "12345" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_connect_missing_pynacl_raises_voice_connect_error(self, player):
+        """connect() converting RuntimeError (missing PyNaCl) to VoiceConnectError.
+
+        This test ensures that discord.py's RuntimeError for missing PyNaCl
+        is properly caught and converted to VoiceConnectError.
+        """
+        channel = MagicMock()
+        channel.id = 12345
+        pynacl_error = RuntimeError("PyNaCl library needed in order to use voice")
+        channel.connect = AsyncMock(side_effect=pynacl_error)
+
+        with pytest.raises(VoiceConnectError) as exc_info:
+            await player.connect(channel)
+
+        # Verify that the original error message is preserved
+        assert "PyNaCl library needed in order to use voice" in str(exc_info.value)
+        assert "12345" in str(exc_info.value)
 
 
 class TestPlaybackCallbackIdentity:

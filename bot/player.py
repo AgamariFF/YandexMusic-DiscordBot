@@ -124,7 +124,14 @@ class GuildPlayer:
                     await self._voice_client.move_to(channel)
                 else:
                     self._voice_client = await channel.connect()
-            except (TimeoutError, discord.ClientException, discord.opus.OpusNotLoaded) as exc:
+            # discord.py сигнализирует отсутствие PyNaCl (без него голос не работает)
+            # голым RuntimeError, а не своим типом исключения — перехватываем и его.
+            except (
+                TimeoutError,
+                discord.ClientException,
+                discord.opus.OpusNotLoaded,
+                RuntimeError,
+            ) as exc:
                 raise VoiceConnectError(
                     f"Не удалось подключиться к голосовому каналу {channel.id}: {exc}",
                     user_message="Не удалось подключиться к голосовому каналу.",
