@@ -1,13 +1,13 @@
-"""Асинхронная обёртка над неофициальным API Яндекс.Музыки (rotor «Моя волна»)."""
+"""Асинхронная обёртка над неофициальным API Яндекс.Музыки (сессионный rotor «Моя волна»)."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from yandex_music import ClientAsync, StationTracksResult
+from yandex_music import ClientAsync, Track
 from yandex_music.exceptions import UnauthorizedError, YandexMusicError
 
 from bot.errors import TrackUnavailableError, WaveUnavailableError, YandexAuthError
@@ -15,7 +15,12 @@ from bot.errors import TrackUnavailableError, WaveUnavailableError, YandexAuthEr
 logger = logging.getLogger(__name__)
 
 WAVE_STATION_ID = "user:onyourwave"
-DEFAULT_WAVE_FROM = "desktop_win-home-playlist_of_the_day-default"
+
+# Полный список типов фидбека шире (см. docs/rotor-session-api.md), но `like`
+# и `dislike` сюда сознательно не включены: бот работает на общем сервере с
+# одним аккаунтом Яндекса, и такая оценка осела бы в личной коллекции
+# владельца токена, а не отражала бы вкус конкретного слушателя.
+FeedbackType = Literal["radioStarted", "trackStarted", "trackFinished", "skip"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,8 +52,43 @@ class WaveBatch:
     tracks: tuple[TrackInfo, ...]
 
 
+def build_feedback(
+    type_: FeedbackType,
+    *,
+    batch_id: str | None,
+    track_id: str | None = None,
+    total_played_seconds: float | None = None,
+    track_length_seconds: float | None = None,
+    from_: str | None = None,
+) -> dict[str, Any]:
+    """Собирает один элемент фидбека сессионного rotor в формате, ожидаемом сервером.
+
+    Полезная нагрузка лежит во вложенном объекте `event`, а `batchId` и
+    `from` — его СОСЕДИ на верхнем уровне, а не поля самого `event`
+    (проверено вживую, см. docs/rotor-session-api.md). Необязательные поля
+    (`trackId`, `totalPlayedSeconds`, `trackLengthSeconds`, `batchId`,
+    `from`) включаются только когда значение действительно передано — набор
+    ключей в точности соответствует тому, что приложение шлёт для
+    конкретного типа события, и серверу не уходит лишний явный `null`.
+    """
+    event: dict[str, Any] = {"type": type_, "timestamp": datetime.now().timestamp()}
+    if track_id is not None:
+        event["trackId"] = track_id
+    if total_played_seconds is not None:
+        event["totalPlayedSeconds"] = total_played_seconds
+    if track_length_seconds is not None:
+        event["trackLengthSeconds"] = track_length_seconds
+
+    feedback: dict[str, Any] = {"event": event}
+    if batch_id is not None:
+        feedback["batchId"] = batch_id
+    if from_ is not None:
+        feedback["from"] = from_
+    return feedback
+
+
 class YandexMusicClient:
-    """Асинхронная обёртка над неофициальным API Яндекс.Музыки (rotor «Моя волна»)."""
+    """Асинхронная обёртка над неофициальным API Яндекс.Музыки (сессионный rotor «Моя волна»)."""
 
     def __init__(self, token: str, *, station: str = WAVE_STATION_ID) -> None:
         """Запоминает токен Яндекса и идентификатор станции волны."""
@@ -56,6 +96,7 @@ class YandexMusicClient:
         self._station = station
         self._client: ClientAsync | None = None
         self._feedback_warned = False
+        self._radio_session_id: str | None = None
 
     @property
     def station(self) -> str:
@@ -99,51 +140,82 @@ class YandexMusicClient:
             )
         return self._client
 
-    async def start_wave(
-        self, *, from_: str = DEFAULT_WAVE_FROM, batch_id: str | None = None
-    ) -> None:
-        """Уведомляет API о старте прослушивания станции волны.
+    def _require_session(self) -> str:
+        """Возвращает идентификатор активной сессии волны либо бросает WaveUnavailableError.
 
-        Фидбек о старте станции необязателен: сервер может отклонить его
-        (например, ошибкой «condition is not met»), но треки волны при этом
-        всё равно получаются и воспроизводятся, поэтому неудача этого
-        фидбека не считается фатальной и не прерывает запуск волны.
-        Отсутствие подключения к клиенту — самостоятельная ошибка состояния
-        и по-прежнему приводит к `WaveUnavailableError`. Протухший токен
-        (`UnauthorizedError`) тоже остаётся фатальным: иначе пользователь
-        увидел бы «волна недоступна» и не узнал, что токен пора перевыпустить.
+        Идентификатор появляется только после успешного `start_session()`.
+        Вызов метода, которому он нужен, раньше — ошибка состояния
+        вызывающей стороны (`WaveSession` обязана вызывать `start_session()`
+        первой), но наружу отдаём тот же `WaveUnavailableError`, что и
+        `_require_client`, чтобы вызывающий код не различал эти два случая
+        недоступности волны.
         """
-        # Вызов нужен ради проверки подключения: без него отсутствие клиента
-        # тихо проглотилось бы блоком `except Exception` ниже, который
-        # намеренно терпит любые неудачи фидбека, а не только отсутствие клиента.
-        self._require_client()
-        logger.info("Старт станции волны %s", self._station)
+        if self._radio_session_id is None:
+            raise WaveUnavailableError(
+                user_message="«Моя волна» не подключена. Попробуйте позже."
+            )
+        return self._radio_session_id
+
+    async def start_session(self) -> WaveBatch:
+        """Создаёт сессию сессионного rotor и возвращает первую пачку треков.
+
+        В сессионном API создание сессии само по себе является стартом
+        прослушивания: отдельный фидбек `radioStarted`, который раньше
+        отправлял `start_wave()` классического ротора, здесь не нужен и не
+        отправляется — сервер уже знает о начале волны из самого факта
+        запроса `session/new` (проверено вживую, см.
+        docs/rotor-session-api.md).
+        """
+        client = self._require_client()
+        url = f"{client.base_url}/rotor/session/new"
+        payload: dict[str, Any] = {"seeds": [self._station], "includeTracksInResponse": True}
         try:
-            await self._send_feedback("radioStarted", batch_id=batch_id, from_=from_)
+            raw = await client.request.post(url, json=payload)
         except UnauthorizedError as exc:
             logger.error(
-                "Токен Яндекса отклонён при старте станции волны: %s: %s",
-                type(exc).__name__,
-                exc,
+                "Не удалось создать сессию «Моей волны»: %s: %s", type(exc).__name__, exc
             )
             raise YandexAuthError() from exc
-        except Exception as exc:
-            self._log_feedback_failure("старт станции волны", exc)
+        except YandexMusicError as exc:
+            logger.warning(
+                "Не удалось создать сессию «Моей волны»: %s: %s", type(exc).__name__, exc
+            )
+            raise WaveUnavailableError() from exc
+        except OSError as exc:
+            logger.warning(
+                "Не удалось создать сессию «Моей волны»: %s: %s", type(exc).__name__, exc
+            )
+            raise WaveUnavailableError() from exc
 
-    async def fetch_wave_batch(self, queue: str | int | None = None) -> WaveBatch:
-        """Запрашивает очередную пачку треков волны."""
+        session_id = raw.get("radioSessionId") if isinstance(raw, dict) else None
+        if not session_id:
+            logger.warning("Ответ на создание сессии «Моей волны» не содержит radioSessionId")
+            raise WaveUnavailableError()
+        self._radio_session_id = session_id
+
+        batch = self._parse_batch(raw, client)
+        logger.info("Сессия «Моей волны» создана, треков в первой пачке: %d", len(batch.tracks))
+        return batch
+
+    async def fetch_session_tracks(
+        self, *, queue: list[str], feedbacks: list[dict[str, Any]]
+    ) -> WaveBatch:
+        """Запрашивает следующую пачку треков сессии вместе с накопленным фидбеком.
+
+        Это ключевое отличие сессионного rotor от классического: оценки
+        уходят не отдельным запросом, а тем же запросом, которым
+        запрашивается следующая пачка, поэтому сервер учитывает их при
+        подборе. При раздельной отправке гонка неизбежна — пачка может быть
+        подобрана раньше, чем доедет скип (см. docs/rotor-session-api.md).
+        """
         client = self._require_client()
+        session_id = self._require_session()
+        url = f"{client.base_url}/rotor/session/{session_id}/tracks"
+        payload: dict[str, Any] = {"queue": queue}
+        if feedbacks:
+            payload["feedbacks"] = feedbacks
         try:
-            # rotor_station_tracks() библиотеки перезаписывает params вместо
-            # обновления: при переданном queue параметр settings2 теряется,
-            # хотя официальные клиенты всегда шлют его вместе с queue. Поэтому
-            # запрос собирается здесь напрямую, с обоими параметрами сразу.
-            url = f"{client.base_url}/rotor/station/{self._station}/tracks"
-            params: dict[str, Any] = {"settings2": "True"}
-            if queue is not None:
-                params["queue"] = queue
-            raw_result = await client.request.get(url, params)
-            result = StationTracksResult.de_json(raw_result, client)
+            raw = await client.request.post(url, json=payload)
         except UnauthorizedError as exc:
             logger.error(
                 "Не удалось получить пачку треков волны: %s: %s", type(exc).__name__, exc
@@ -160,13 +232,58 @@ class YandexMusicClient:
             )
             raise WaveUnavailableError() from exc
 
-        if result is None or not result.sequence:
-            logger.debug("Получена пустая пачка треков волны")
-            return WaveBatch(batch_id=result.batch_id if result is not None else None, tracks=())
+        return self._parse_batch(raw, client)
+
+    async def send_feedbacks(self, feedbacks: list[dict[str, Any]]) -> None:
+        """Отправляет пачку накопленных фидбеков одним запросом, без запроса треков.
+
+        Обычный путь доставки фидбека — прицепить его к `fetch_session_tracks`,
+        где сервер учтёт оценку при подборе следующей пачки; этот метод
+        нужен, когда фидбек нужно отправить сам по себе. Как и для
+        отдельного фидбека в классическом роторе, неудача такой отправки не
+        считается фатальной (сервер может, например, отклонить фидбек
+        ошибкой «condition is not met») и не должна мешать воспроизведению,
+        поэтому она не выбрасывается наружу, а логируется через
+        `_log_feedback_failure`.
+        """
+        if not feedbacks:
+            return
+        try:
+            client = self._require_client()
+            session_id = self._require_session()
+            # Завершающий слэш в пути обязателен: без него сервер обрывает
+            # TCP-соединение вместо ответа 404, и это легко принять за
+            # сетевую проблему (проверено вживую, см.
+            # docs/rotor-session-api.md) — не убирайте его «для красоты».
+            url = f"{client.base_url}/rotor/session/{session_id}/feedbacks/"
+            await client.request.post(url, json={"feedbacks": feedbacks})
+        except Exception as exc:
+            self._log_feedback_failure("отправка фидбеков волны", exc)
+
+    def _parse_batch(self, raw: dict[str, Any] | None, client: ClientAsync) -> WaveBatch:
+        """Разбирает ответ сессионного rotor (`session/new` или `.../tracks`) в WaveBatch.
+
+        `StationTracksResult.de_json` здесь не подходит — у ответа сессии
+        другая форма: элементы `sequence` это словари, а не объекты
+        библиотеки, и вложенный трек нужно вручную превратить в объект
+        `Track` через `Track.de_json`, иначе `resolve_stream_url` не сможет
+        получить у него ссылку на поток (нужен метод
+        `get_download_info_async`, которого нет у сырого словаря).
+        Проверено вживую, см. docs/rotor-session-api.md.
+        """
+        if raw is None:
+            logger.debug("Получен пустой ответ rotor вместо пачки треков волны")
+            return WaveBatch(batch_id=None, tracks=())
+
+        batch_id = raw.get("batchId")
+        sequence = raw.get("sequence") or []
 
         tracks: list[TrackInfo] = []
-        for item in result.sequence:
-            track = item.track
+        for item in sequence:
+            raw_track = item.get("track")
+            if not raw_track:
+                continue
+            track = Track.de_json(raw_track, client)
             if track is None or track.available is False:
                 continue
             artists = ", ".join(a.name for a in track.artists) or "Неизвестный исполнитель"
@@ -181,8 +298,11 @@ class YandexMusicClient:
                 )
             )
 
-        logger.info("Получена пачка треков волны: %d шт.", len(tracks))
-        return WaveBatch(batch_id=result.batch_id, tracks=tuple(tracks))
+        if tracks:
+            logger.info("Получена пачка треков волны: %d шт.", len(tracks))
+        else:
+            logger.debug("Получена пустая пачка треков волны")
+        return WaveBatch(batch_id=batch_id, tracks=tuple(tracks))
 
     def _log_feedback_failure(self, what: str, exc: Exception) -> None:
         """Логирует неудачу фидбека: первую заметно, последующие — на DEBUG.
@@ -202,72 +322,6 @@ class YandexMusicClient:
             type(exc).__name__,
             exc,
         )
-
-    async def _send_feedback(
-        self,
-        type_: str,
-        *,
-        batch_id: str | None = None,
-        track_id: str | None = None,
-        total_played_seconds: float | None = None,
-        from_: str | None = None,
-    ) -> None:
-        """Отправляет фидбек rotor напрямую в формате JSON.
-
-        Библиотека `yandex-music` отправляет тело фидбека как
-        `application/x-www-form-urlencoded`, а сервер Яндекс.Музыки принимает
-        только JSON и на форму отвечает `400 condition is not met` на любой
-        тип фидбека. Поэтому запрос собирается здесь вручную, но выполняется
-        через публичный `request` библиотечного клиента — он несёт
-        авторизацию и заголовки, менять нужно только тело и его кодирование.
-        """
-        client = self._require_client()
-        url = f"{client.base_url}/rotor/station/{self._station}/feedback"
-        params = {"batch-id": batch_id} if batch_id else {}
-        payload: dict[str, Any] = {"type": type_, "timestamp": datetime.now().timestamp()}
-        if track_id is not None:
-            payload["trackId"] = track_id
-        if total_played_seconds is not None:
-            payload["totalPlayedSeconds"] = total_played_seconds
-        if from_ is not None:
-            payload["from"] = from_
-        logger.debug("Отправка фидбека rotor: type=%s track_id=%s", type_, track_id)
-        await client.request.post(url, params=params, json=payload)
-
-    async def notify_track_started(self, track_id: str, batch_id: str | None) -> None:
-        """Сообщает API о начале воспроизведения трека."""
-        try:
-            await self._send_feedback("trackStarted", track_id=track_id, batch_id=batch_id)
-        except Exception as exc:
-            self._log_feedback_failure(f"старт трека {track_id}", exc)
-
-    async def notify_track_finished(
-        self, track_id: str, played_seconds: float, batch_id: str | None
-    ) -> None:
-        """Сообщает API об окончании воспроизведения трека."""
-        try:
-            await self._send_feedback(
-                "trackFinished",
-                track_id=track_id,
-                total_played_seconds=played_seconds,
-                batch_id=batch_id,
-            )
-        except Exception as exc:
-            self._log_feedback_failure(f"завершение трека {track_id}", exc)
-
-    async def notify_track_skipped(
-        self, track_id: str, played_seconds: float, batch_id: str | None
-    ) -> None:
-        """Сообщает API о пропуске трека."""
-        try:
-            await self._send_feedback(
-                "skip",
-                track_id=track_id,
-                total_played_seconds=played_seconds,
-                batch_id=batch_id,
-            )
-        except Exception as exc:
-            self._log_feedback_failure(f"пропуск трека {track_id}", exc)
 
     async def resolve_stream_url(self, track: TrackInfo) -> str:
         """Возвращает прямую ссылку на аудиопоток лучшего доступного качества."""
