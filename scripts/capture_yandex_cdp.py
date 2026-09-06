@@ -43,6 +43,11 @@ FILTER_HOST_SUBSTRING = "music.yandex"
 REQUEST_BODY_LIMIT = 4000
 RESPONSE_BODY_LIMIT = 20000
 CONSOLE_BODY_LIMIT = 200
+# По умолчанию CDP вообще не кладёт postData в Network.requestWillBeSent — только
+# если явно задать максимальный размер сохраняемого тела при включении домена.
+# Тела фидбека ротора и запросов треков намного меньше этого лимита, а раздувать
+# память ради тел, которые всё равно обрежутся при записи, смысла нет.
+MAX_POST_DATA_SIZE = 65536
 HIGHLIGHT_MARKERS = ("rotor", "feedback", "session", "wave", "queue")
 REDACTED = "<вырезано>"
 
@@ -250,7 +255,7 @@ async def _handle_event(
 
     if method == "Network.requestWillBeSent" and request_id:
         request = params.get("request") or {}
-        requests[request_id] = {
+        entry = {
             "timestamp": datetime.now(UTC).isoformat(),
             "http_method": request.get("method", ""),
             "url": request.get("url", ""),
@@ -258,6 +263,24 @@ async def _handle_event(
             "post_data": request.get("postData"),
             "status": None,
         }
+        # Запись в requests должна произойти синхронно, до любого await: иначе
+        # событие Network.responseReceived/loadingFinished по этому же requestId,
+        # обрабатываемое своей отдельной задачей, могло бы не найти запрос в
+        # словаре и обмен потерялся бы целиком.
+        requests[request_id] = entry
+
+        if not entry["post_data"] and request.get("hasPostData"):
+            # CDP выставляет hasPostData=True, но не кладёт само postData в событие,
+            # если тело слишком большое даже для maxPostDataSize (или просто не успело
+            # попасть в событие) — в этом случае его нужно дозапросить отдельно.
+            try:
+                result = await call("Network.getRequestPostData", {"requestId": request_id})
+            except Exception:
+                # Запрос мог уже быть отброшен браузером или команда не уложилась
+                # в таймаут — это не повод ронять обработку события, тело просто
+                # останется пустым, как и раньше.
+                result = {}
+            entry["post_data"] = result.get("postData")
         return
 
     if method == "Network.responseReceived" and request_id in requests:
@@ -361,7 +384,7 @@ async def _watch_target(
             reader = asyncio.create_task(_read_loop())
             try:
                 try:
-                    await call("Network.enable")
+                    await call("Network.enable", {"maxPostDataSize": MAX_POST_DATA_SIZE})
                 except TimeoutError:
                     # Обычные (dedicated) worker в этой сборке Chromium не отвечают на
                     # Network.enable — домен Network им не поддерживается. Это ожидаемое
