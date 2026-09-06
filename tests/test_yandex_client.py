@@ -12,6 +12,7 @@ from bot.yandex.client import (
     TrackInfo,
     YandexMusicClient,
     build_feedback,
+    build_radio_started_feedback,
 )
 
 
@@ -567,21 +568,39 @@ class TestYandexMusicClientStartSession:
 class TestBuildFeedback:
     """Тесты для функции build_feedback()."""
 
-    def test_build_feedback_radio_started(self):
-        """build_feedback для radioStarted имеет правильную структуру."""
-        feedback = build_feedback("radioStarted", batch_id="batch1", from_="custom_from")
+    def test_build_radio_started_feedback(self):
+        """build_radio_started_feedback имеет правильную структуру: from дублируется.
 
+        Это основной случай защиты от регрессии: ревьюер нашёл мутацией, что
+        убрание "from" из внутреннего event не ловилось тестами. Теперь проверяем
+        что from присутствует и внутри event, и на верхнем уровне; batchId отсутствует;
+        timestamp в формате ISO с суффиксом Z; тип события — radioStarted.
+        """
+        feedback = build_radio_started_feedback(from_="custom_from")
+
+        # Проверяем структуру: есть event и from на верхнем уровне
         assert "event" in feedback
-        assert feedback["event"]["type"] == "radioStarted"
+        assert "from" in feedback
+        assert feedback["from"] == "custom_from"
+
+        # В event дублируется from и timestamp
+        event = feedback["event"]
+        assert event["type"] == "radioStarted"
+        assert event["from"] == "custom_from", (
+            "Поле 'from' должно присутствовать внутри event (дублироваться)"
+        )
+
         # Проверяем формат timestamp: ISO-8601 с суффиксом Z, без +00:00
-        assert "timestamp" in feedback["event"]
-        ts = feedback["event"]["timestamp"]
+        ts = event["timestamp"]
         assert ts.endswith("Z"), f"Timestamp должен заканчиваться на Z, получено {ts}"
         assert "+00:00" not in ts, f"Timestamp не должен содержать +00:00, получено {ts}"
-        # Проверяем наличие from
-        assert feedback["batchId"] == "batch1"
-        assert feedback["from"] == "custom_from"
-        assert "trackId" not in feedback["event"]
+
+        # radioStarted НЕ имеет batchId (пачка ещё не запрашивалась)
+        assert "batchId" not in feedback, (
+            "radioStarted не должен иметь batchId на верхнем уровне"
+        )
+        # radioStarted НЕ имеет trackId (это инициирующий событие, не на трек)
+        assert "trackId" not in event
 
     def test_build_feedback_track_started(self):
         """build_feedback для trackStarted имеет trackId и from."""
@@ -717,7 +736,14 @@ class TestStartSessionRadioStartedFeedback:
 
     @pytest.mark.asyncio
     async def test_start_session_sends_radio_started_feedback(self):
-        """start_session() отправляет radioStarted фидбек после создания сессии."""
+        """start_session() отправляет radioStarted фидбек на одиночный .../feedback/.
+
+        Мутационная защита: раньше тест был слишком слаб (только проверял наличие
+        "feedback" в URL). Теперь усилен:
+        - Проверяет что отправка идёт на .../feedback/ (единственное число, не .../feedbacks/)
+        - Проверяет что тело это сам фидбек, без обёртки {"feedbacks": [...]}
+        - Проверяет что внутри фидбека есть radioStarted
+        """
         mock_session_new_response = {
             "radioSessionId": "sid123",
             "batchId": "b1",
@@ -728,11 +754,15 @@ class TestStartSessionRadioStartedFeedback:
         mock_client_obj.base_url = "https://api.music.yandex.net"
         mock_client_obj.request = MagicMock()
 
-        send_feedbacks_calls = []
+        captured_calls = {"feedback_calls": [], "feedbacks_calls": []}
 
         async def capture_post(url, **kwargs):
-            if "feedback" in url:
-                send_feedbacks_calls.append((url, kwargs))
+            if "/feedback/" in url and "/feedbacks/" not in url:
+                # Одиночный эндпоинт .../feedback/
+                captured_calls["feedback_calls"].append((url, kwargs))
+            elif "/feedbacks/" in url:
+                # Пакетный эндпоинт .../feedbacks/
+                captured_calls["feedbacks_calls"].append((url, kwargs))
             return mock_session_new_response
 
         mock_client_obj.request.post = AsyncMock(side_effect=capture_post)
@@ -742,10 +772,29 @@ class TestStartSessionRadioStartedFeedback:
 
         await client.start_session()
 
-        # Проверяем что feedback был отправлен (это будет вызов send_feedbacks)
-        assert len(send_feedbacks_calls) > 0, (
-            "После start_session должен быть вызов для отправки radioStarted фидбека"
+        # Проверяем что отправка была ровно на одиночный .../feedback/
+        assert len(captured_calls["feedback_calls"]) > 0, (
+            "После start_session должен быть вызов на .../feedback/ для radioStarted"
         )
+        # Убедимся что на .../feedbacks/ (пакетный) НЕ было вызова
+        assert len(captured_calls["feedbacks_calls"]) == 0, (
+            "radioStarted должен отправляться на .../feedback/, а не на .../feedbacks/"
+        )
+
+        # Проверяем что в теле фидбека есть radioStarted, без обёртки feedbacks
+        url, kwargs = captured_calls["feedback_calls"][0]
+        feedback_body = kwargs.get("json")
+        assert feedback_body is not None
+        # Проверяем что это не обёрнуто в {"feedbacks": [...]}
+        assert "feedbacks" not in feedback_body, (
+            'Одиночный фидбек не должен быть обёрнут в {"feedbacks": [...]}'
+        )
+        # Проверяем что это radioStarted
+        assert "event" in feedback_body
+        assert feedback_body["event"]["type"] == "radioStarted"
+        # Проверяем что from дублируется
+        assert "from" in feedback_body
+        assert feedback_body["event"]["from"] == feedback_body["from"]
 
 
 class TestSessionNewRequestBody:

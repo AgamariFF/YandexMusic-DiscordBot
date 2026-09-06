@@ -432,6 +432,42 @@ class TestWaveSessionFeedback:
         assert len(feedbacks) > 0
         assert feedbacks[0]["event"]["totalPlayedSeconds"] == 0.0
 
+    @pytest.mark.asyncio
+    async def test_played_seconds_rounds_to_fractional(self):
+        """_normalize_played_seconds округляет до 3 знаков, не до целых.
+
+        Мутационная защита: ревьюер нашёл что при возврате целых секунд
+        (вместо дробных) тесты не падали. Теперь проверяем что дробное
+        значение остаётся дробным: 22.4341 должно округляться до 22.434,
+        а не до 22.0 (целые секунды). Проверяем оба пути: trackFinished
+        и track_skipped используют один _normalize_played_seconds.
+        """
+        batch1 = WaveBatch(batch_id="batch1", tracks=(make_track("1"),))
+        batch2 = WaveBatch(batch_id="batch2", tracks=(make_track("2"),))
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch1, batch2]
+        session = WaveSession(client)
+
+        await session.start()
+        track = await session.next_track()
+        # Отправляем дробное значение (22.4341 -> 22.434 при round(..., 3))
+        await session.track_finished(track, 22.4341)
+
+        await session.next_track()
+        fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
+        feedbacks = fetch_calls[-1][2]
+        assert len(feedbacks) > 0
+        played_seconds = feedbacks[0]["event"]["totalPlayedSeconds"]
+        # Проверяем что это дробное, не целое (не 22.0)
+        assert played_seconds == 22.434, (
+            f"Должно быть 22.434 (3 знака), получено {played_seconds}"
+        )
+        # Дополнительная проверка: не целое число
+        assert played_seconds != int(played_seconds), (
+            f"Значение должно быть дробным, а не целым: {played_seconds}"
+        )
+
 
 class TestWaveSessionBatchId:
     """Тесты свойства batch_id."""
