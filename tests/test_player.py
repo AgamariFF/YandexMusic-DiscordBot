@@ -8,7 +8,50 @@ import pytest
 from bot.audio.bassboost import BassLevel
 from bot.errors import BotError, NotConnectedError, NothingPlayingError, VoiceConnectError
 from bot.player import GuildPlayer, PlayerState
-from bot.yandex.client import TrackInfo
+from bot.yandex.client import TrackInfo, WaveBatch
+from bot.yandex.wave import WaveSession
+
+
+def make_track(track_id, title="Song"):
+    """Helper to create a TrackInfo."""
+    return TrackInfo(id=track_id, title=title, artists="Artist", duration=180.0, raw=None)
+
+
+class FakeMusicClient:
+    """Fake YandexMusicClient for testing."""
+
+    def __init__(self):
+        self.calls = []
+        self.batches_to_return = []
+        self.batch_index = 0
+
+    async def start_session(self) -> WaveBatch:
+        """Start session and return first batch."""
+        self.calls.append(("start_session",))
+        if self.batch_index < len(self.batches_to_return):
+            batch = self.batches_to_return[self.batch_index]
+            self.batch_index += 1
+            return batch
+        return WaveBatch(batch_id=None, tracks=())
+
+    async def fetch_session_tracks(
+        self, *, queue: list[str], feedbacks: list[dict]
+    ) -> WaveBatch:
+        """Fetch next batch of tracks."""
+        self.calls.append(("fetch_session_tracks", queue, feedbacks))
+        if self.batch_index < len(self.batches_to_return):
+            batch = self.batches_to_return[self.batch_index]
+            self.batch_index += 1
+            return batch
+        return WaveBatch(batch_id=None, tracks=())
+
+    async def send_feedbacks(self, feedbacks: list[dict]) -> None:
+        """Send feedbacks."""
+        self.calls.append(("send_feedbacks", feedbacks))
+
+    async def resolve_stream_url(self, track: TrackInfo) -> str:
+        """Resolve stream URL for a track."""
+        return f"https://fake.url/{track.id}.mp3"
 
 
 @pytest.fixture
@@ -124,6 +167,44 @@ class TestPlayerStartWave:
         with pytest.raises(NotConnectedError):
             await player.start_wave()
 
+    @pytest.mark.asyncio
+    async def test_start_wave_flushes_pending_feedbacks_from_old_session(self):
+        """start_wave() flushes pending feedbacks from old session before creating new one.
+
+        Регрессионный тест: при перезапуске волны поверх играющего трека
+        скип должен уйти на клиент по старой сессии, прежде чем она будет заменена.
+        """
+        client = AsyncMock()
+        client.resolve_stream_url = AsyncMock(return_value="https://fake.url/track.mp3")
+
+        player = GuildPlayer(client, ffmpeg_path="ffmpeg", default_volume=0.5, idle_timeout=300)
+
+        # Mock voice client
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        player._voice_client = voice_client
+
+        # Create and set up old session with pending feedbacks
+        old_session = AsyncMock(spec=WaveSession)
+        old_session.flush_pending_feedbacks = AsyncMock()
+        player._session = old_session
+
+        # Create new session that will replace old one
+        new_session = AsyncMock(spec=WaveSession)
+        new_session.start = AsyncMock()
+        new_session.next_track = AsyncMock(return_value=make_track("1"))
+
+        # Patch WaveSession constructor to return our new_session
+        import unittest.mock as mock_module
+        with mock_module.patch("bot.player.WaveSession", return_value=new_session):
+            await player.start_wave()
+
+        # Verify that old session's flush_pending_feedbacks was called
+        old_session.flush_pending_feedbacks.assert_called_once()
+        # Verify that new session was set up
+        new_session.start.assert_called_once()
+        new_session.next_track.assert_called_once()
+
 
 class TestPlayerVolume:
     """Tests for volume control."""
@@ -192,6 +273,34 @@ class TestPlayerDisconnect:
         """disconnect() called twice doesn't raise."""
         await player.disconnect()
         await player.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_flushes_pending_feedbacks(self):
+        """disconnect() flushes pending feedbacks before stopping session.
+
+        Регрессионный тест: при отключении плеера накопленный фидбек должен
+        быть отправлен перед сбросом сессии (например, при /leave команде).
+        """
+        client = AsyncMock()
+
+        player = GuildPlayer(client, ffmpeg_path="ffmpeg", default_volume=0.5, idle_timeout=300)
+
+        # Mock voice client
+        voice_client = MagicMock()
+        player._voice_client = voice_client
+
+        # Create session with pending feedbacks
+        session = AsyncMock(spec=WaveSession)
+        session.flush_pending_feedbacks = AsyncMock()
+        player._session = session
+
+        # Disconnect - this should flush pending feedbacks
+        await player.disconnect()
+
+        # Verify that session's flush_pending_feedbacks was called
+        session.flush_pending_feedbacks.assert_called_once()
+        # Verify voice_client disconnect was called
+        voice_client.disconnect.assert_called_once()
 
 
 class TestPlayerConnect:

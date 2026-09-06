@@ -101,39 +101,41 @@ class TestWaveSessionStart:
         assert any(call[0] == "start_session" for call in client.calls)
 
     @pytest.mark.asyncio
-    async def test_start_sends_pending_feedbacks_before_creating_session(self):
-        """start() отправляет накопленный фидбек перед созданием новой сессии.
-
-        Это защита от регрессии: при перезапуске волны поверх играющего трека
-        скип успевает уйти по старой сессии.
-        """
+    async def test_flush_pending_feedbacks(self):
+        """flush_pending_feedbacks() отправляет накопленный фидбек и опустошает очередь."""
         batch = WaveBatch(batch_id="batch1", tracks=(make_track("1"),))
         client = FakeMusicClient()
-        client.batches_to_return = [batch, batch]
+        client.batches_to_return = [batch]
         session = WaveSession(client)
 
-        # Первый start() заполнит буфер
         await session.start()
         track = await session.next_track()
 
-        # Пропустим трек, что добавит фидбек в очередь
-        await session.track_skipped(track, 5.0)
+        # Накопим фидбеки
+        await session.track_started(track)
+        await session.track_finished(track, 42.5)
+        await session.track_skipped(track, 10.0)
 
-        # Второй start() должен отправить этот фидбек перед start_session
-        await session.start()
+        # Досылаем накопленное
+        await session.flush_pending_feedbacks()
 
-        # Проверяем порядок вызовов: send_feedbacks должен быть перед start_session
-        send_feedbacks_index = None
-        start_session_index = None
-        for i, call in enumerate(client.calls):
-            if call[0] == "send_feedbacks":
-                send_feedbacks_index = i
-            elif call[0] == "start_session":
-                start_session_index = i
+        # Проверяем что send_feedbacks был вызван с ровно тремя фидбеками
+        send_calls = [c for c in client.calls if c[0] == "send_feedbacks"]
+        assert len(send_calls) >= 1, "send_feedbacks должен быть вызван"
 
-        assert send_feedbacks_index is not None
-        assert start_session_index is not None
-        assert send_feedbacks_index < start_session_index
+        # Берём последний вызов send_feedbacks
+        feedbacks = send_calls[-1][1]
+        assert len(feedbacks) == 3, f"Должно быть 3 фидбека, получено {len(feedbacks)}"
+
+        # Проверяем содержимое фидбеков в правильном порядке
+        types = [f["event"]["type"] for f in feedbacks]
+        assert types == ["trackStarted", "trackFinished", "skip"], (
+            f"Фидбеки должны быть в порядке (trackStarted, trackFinished, skip), "
+            f"получено {types}"
+        )
+
+        # Проверяем что очередь пуста после flush
+        assert session.buffered == 0, "Очередь должна быть пуста после flush_pending_feedbacks()"
 
 
 class TestWaveSessionNextTrack:
