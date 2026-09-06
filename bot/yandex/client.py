@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from yandex_music import ClientAsync, Track
@@ -15,6 +15,13 @@ from bot.errors import TrackUnavailableError, WaveUnavailableError, YandexAuthEr
 logger = logging.getLogger(__name__)
 
 WAVE_STATION_ID = "user:onyourwave"
+
+# Значение поля `from`, которое официальное приложение передаёт в каждом
+# фидбеке (у него это, например, `desktop-wave_landing_screen-my_wave-radio-
+# default`, проверено дампом трафика). Бот — не десктопное приложение
+# Яндекса, и притворяться им незачем; достаточно узнаваемой и стабильной
+# строки, честно отражающей, что фидбек шлёт именно наш клиент.
+FEEDBACK_FROM = "discord-bot-my_wave-radio-default"
 
 # Полный список типов фидбека шире (см. docs/rotor-session-api.md), но `like`
 # и `dislike` сюда сознательно не включены: бот работает на общем сервере с
@@ -28,6 +35,12 @@ class TrackInfo:
     """Доменное представление трека волны."""
 
     id: str
+    # Составной `<id трека>:<id альбома>`, ровно в этом виде трек уходит на
+    # сервер в `trackId` фидбека и в `queue` запроса пачки (проверено дампом
+    # трафика официального приложения: трек 38077233 с альбомом 4849007
+    # уходит как "38077233:4849007"). У `id` семантика другая — по нему
+    # ведётся внутренняя логика (`_recent`, сравнения), её не трогаем.
+    feedback_id: str
     title: str
     artists: str
     duration: float
@@ -52,6 +65,19 @@ class WaveBatch:
     tracks: tuple[TrackInfo, ...]
 
 
+def _now_iso() -> str:
+    """Текущее время в UTC как строка ISO-8601 с миллисекундами и суффиксом `Z`.
+
+    Официальное приложение шлёт временные метки вида
+    `"2026-09-06T18:32:50.733Z"` (проверено дампом трафика). Стандартный
+    `datetime.now(UTC).isoformat()` даёт микросекунды и суффикс `+00:00` —
+    ни то ни другое не совпадает: обрезаем дробную часть до миллисекунд
+    через `timespec` и вручную заменяем `+00:00` на `Z`, потому что сам
+    `datetime` такой суффикс не производит.
+    """
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def build_feedback(
     type_: FeedbackType,
     *,
@@ -59,19 +85,22 @@ def build_feedback(
     track_id: str | None = None,
     total_played_seconds: float | None = None,
     track_length_seconds: float | None = None,
-    from_: str | None = None,
+    from_: str = FEEDBACK_FROM,
 ) -> dict[str, Any]:
     """Собирает один элемент фидбека сессионного rotor в формате, ожидаемом сервером.
 
     Полезная нагрузка лежит во вложенном объекте `event`, а `batchId` и
     `from` — его СОСЕДИ на верхнем уровне, а не поля самого `event`
-    (проверено вживую, см. docs/rotor-session-api.md). Необязательные поля
-    (`trackId`, `totalPlayedSeconds`, `trackLengthSeconds`, `batchId`,
-    `from`) включаются только когда значение действительно передано — набор
-    ключей в точности соответствует тому, что приложение шлёт для
-    конкретного типа события, и серверу не уходит лишний явный `null`.
+    (проверено дампом трафика официального приложения, см.
+    docs/rotor-session-api.md). Необязательные поля (`trackId`,
+    `totalPlayedSeconds`, `trackLengthSeconds`, `batchId`) включаются только
+    когда значение действительно передано, а вот `from` уходит всегда —
+    приложение кладёт его в каждый фидбек без исключений. `track_id` здесь
+    ожидает уже готовый составной идентификатор (`TrackInfo.feedback_id`,
+    `<id трека>:<id альбома>`), а не голый `TrackInfo.id`, — именно в таком
+    виде сервер хочет видеть `trackId` (проверено дампом трафика).
     """
-    event: dict[str, Any] = {"type": type_, "timestamp": datetime.now().timestamp()}
+    event: dict[str, Any] = {"type": type_, "timestamp": _now_iso()}
     if track_id is not None:
         event["trackId"] = track_id
     if total_played_seconds is not None:
@@ -79,12 +108,24 @@ def build_feedback(
     if track_length_seconds is not None:
         event["trackLengthSeconds"] = track_length_seconds
 
-    feedback: dict[str, Any] = {"event": event}
+    feedback: dict[str, Any] = {"event": event, "from": from_}
     if batch_id is not None:
         feedback["batchId"] = batch_id
-    if from_ is not None:
-        feedback["from"] = from_
     return feedback
+
+
+def build_radio_started_feedback(from_: str = FEEDBACK_FROM) -> dict[str, Any]:
+    """Собирает фидбек `radioStarted`, отправляемый отдельным запросом после `session/new`.
+
+    Его форма выбивается из общей схемы `build_feedback`: `batchId` не
+    передаётся вовсе (пачка ещё не запрашивалась отдельным запросом
+    фидбека), а `from` дублируется — и внутри `event`, и снаружи него.
+    Именно так делает официальное приложение сразу после создания сессии
+    (проверено дампом трафика), хотя раньше мы считали, что отдельный
+    `radioStarted` не нужен вовсе.
+    """
+    event = {"type": "radioStarted", "timestamp": _now_iso(), "from": from_}
+    return {"event": event, "from": from_}
 
 
 class YandexMusicClient:
@@ -159,16 +200,20 @@ class YandexMusicClient:
     async def start_session(self) -> WaveBatch:
         """Создаёт сессию сессионного rotor и возвращает первую пачку треков.
 
-        В сессионном API создание сессии само по себе является стартом
-        прослушивания: отдельный фидбек `radioStarted`, который раньше
-        отправлял `start_wave()` классического ротора, здесь не нужен и не
-        отправляется — сервер уже знает о начале волны из самого факта
-        запроса `session/new` (проверено вживую, см.
-        docs/rotor-session-api.md).
+        Раньше мы считали, что создание сессии само по себе уже является
+        стартом прослушивания, и отдельный `radioStarted` не отправляли. Дамп
+        трафика официального приложения показал обратное: оно всё равно шлёт
+        `radioStarted` отдельным запросом сразу после `session/new` (см.
+        docs/rotor-session-api.md), и мы делаем так же — см. отправку ниже.
         """
         client = self._require_client()
         url = f"{client.base_url}/rotor/session/new"
-        payload: dict[str, Any] = {"seeds": [self._station], "includeTracksInResponse": True}
+        payload: dict[str, Any] = {
+            "seeds": [self._station],
+            "includeTracksInResponse": True,
+            "includeWaveModel": True,
+            "interactive": True,
+        }
         try:
             raw = await client.request.post(url, json=payload)
         except UnauthorizedError as exc:
@@ -192,6 +237,14 @@ class YandexMusicClient:
             logger.warning("Ответ на создание сессии «Моей волны» не содержит radioSessionId")
             raise WaveUnavailableError()
         self._radio_session_id = session_id
+
+        # Официальное приложение шлёт `radioStarted` отдельным запросом сразу
+        # после `session/new` (проверено дампом трафика) — воспроизводим это
+        # поведение. Неудача этого фидбека не должна ломать запуск волны:
+        # `send_feedbacks` уже проглатывает такие ошибки через
+        # `_log_feedback_failure`, сессия и первая пачка треков к этому
+        # моменту уже получены.
+        await self.send_feedbacks([build_radio_started_feedback()])
 
         batch = self._parse_batch(raw, client)
         logger.info("Сессия «Моей волны» создана, треков в первой пачке: %d", len(batch.tracks))
@@ -288,9 +341,16 @@ class YandexMusicClient:
                 continue
             artists = ", ".join(a.name for a in track.artists) or "Неизвестный исполнитель"
             duration = (track.duration_ms / 1000) if track.duration_ms else 0.0
+            # Составной id для фидбека — `<id трека>:<id альбома>`, как шлёт
+            # официальное приложение (проверено дампом трафика). Трек без
+            # альбомов теоретически возможен — запасной вариант обязателен,
+            # падать здесь нельзя.
+            album_id = track.albums[0].id if track.albums else None
+            feedback_id = f"{track.id}:{album_id}" if album_id is not None else str(track.id)
             tracks.append(
                 TrackInfo(
                     id=str(track.id),
+                    feedback_id=feedback_id,
                     title=track.title,
                     artists=artists,
                     duration=duration,

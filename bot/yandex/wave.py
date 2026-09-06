@@ -56,7 +56,7 @@ class WaveSession:
         self._pending_feedbacks: deque[dict[str, Any]] = deque(maxlen=MAX_PENDING_FEEDBACKS)
         self._batch_id: str | None = None
         self._current_batch_id: str | None = None
-        self._last_track_id: str | None = None
+        self._last_track: TrackInfo | None = None
         self._recent: deque[str] = deque(maxlen=RECENT_TRACKS_MEMORY)
         self._started = False
 
@@ -106,7 +106,7 @@ class WaveSession:
         batch = await self._client.start_session()
         self._buffer.clear()
         self._current_batch_id = None
-        self._last_track_id = None
+        self._last_track = None
         self._recent.clear()
         self._batch_id = batch.batch_id
         self._buffer.extend(batch.tracks[:MAX_BUFFERED_TRACKS])
@@ -123,7 +123,7 @@ class WaveSession:
             raise WaveUnavailableError(user_message="«Моя волна» не запущена.")
 
         if not self._buffer:
-            queue = [self._last_track_id] if self._last_track_id is not None else []
+            queue = self._build_queue(self._last_track) if self._last_track is not None else []
 
             # Последняя непустая пачка, состоящая из одних повторов: запасной
             # вариант на случай, если свежих треков так и не найдётся.
@@ -183,12 +183,12 @@ class WaveSession:
                 )
 
         track = self._buffer.popleft()
-        self._last_track_id = track.id
+        self._last_track = track
         self._recent.append(track.id)
         # Фидбек по этому треку должен уйти с batch_id той цепочки, из которой
         # он взят, поэтому фиксируем его ДО обновления цепочки ниже.
         self._current_batch_id = self._batch_id
-        await self._refresh_chain(track.id)
+        await self._refresh_chain(track)
         return track
 
     def upcoming(self, limit: int = 5) -> list[TrackInfo]:
@@ -205,7 +205,7 @@ class WaveSession:
         (см. `_refresh_chain`) — именно так работает сессионный rotor-API.
         """
         self._enqueue_feedback(
-            build_feedback("trackStarted", batch_id=self.batch_id, track_id=track.id)
+            build_feedback("trackStarted", batch_id=self.batch_id, track_id=track.feedback_id)
         )
 
     async def track_finished(self, track: TrackInfo, played_seconds: float) -> None:
@@ -215,7 +215,7 @@ class WaveSession:
             build_feedback(
                 "trackFinished",
                 batch_id=self.batch_id,
-                track_id=track.id,
+                track_id=track.feedback_id,
                 total_played_seconds=self._normalize_played_seconds(played_seconds),
                 track_length_seconds=track_length_seconds,
             )
@@ -237,7 +237,7 @@ class WaveSession:
             build_feedback(
                 "skip",
                 batch_id=self.batch_id,
-                track_id=track.id,
+                track_id=track.feedback_id,
                 total_played_seconds=self._normalize_played_seconds(played_seconds),
             )
         )
@@ -286,17 +286,33 @@ class WaveSession:
         """
         self._pending_feedbacks.extendleft(reversed(feedbacks))
 
-    async def _refresh_chain(self, after_track_id: str) -> None:
-        """Обновляет хвост цепочки буфера после выдачи трека `after_track_id`.
+    def _build_queue(self, after: TrackInfo) -> list[str]:
+        """Строит `queue` запроса пачки: составной id `after`, плюс следующий, если он уже в буфере.
 
-        Запрашивает `fetch_session_tracks` с `queue=[after_track_id]` и всеми
-        фидбеками, накопленными с прошлого запроса (включая фидбек по
+        Официальное приложение сообщает серверу оба конца своей локальной
+        очереди воспроизведения — трек, по которому едет фидбек, и
+        следующий за ним, уже ожидающий в очереди (проверено дампом
+        трафика). Раньше мы передавали единственный голый идентификатор.
+        Оба элемента — составные `feedback_id` (`<id трека>:<id альбома>`),
+        а не `id`.
+        """
+        queue = [after.feedback_id]
+        if self._buffer:
+            queue.append(self._buffer[0].feedback_id)
+        return queue
+
+    async def _refresh_chain(self, after: TrackInfo) -> None:
+        """Обновляет хвост цепочки буфера после выдачи трека `after`.
+
+        Запрашивает `fetch_session_tracks` с `queue`, построенным из `after`
+        и (если есть) следующего за ним трека буфера (см. `_build_queue`), и
+        всеми фидбеками, накопленными с прошлого запроса (включая фидбек по
         только что выданному треку, в том числе skip), — сервер учитывает их
         В ЭТОМ ЖЕ запросе при подборе следующей пачки, поэтому отдельный
         запрос фидбека не нужен и гонка между ним и получением треков
-        исключена. Полученная цепочка ЗАМЕНЯЕТ текущий буфер; сам
-        `after_track_id` в буфер не возвращается, так как он уже попал в
-        `_recent` и будет отфильтрован наравне с прочими недавними треками.
+        исключена. Полученная цепочка ЗАМЕНЯЕТ текущий буфер; сам `after` в
+        буфер не возвращается, так как он уже попал в `_recent` и будет
+        отфильтрован наравне с прочими недавними треками.
 
         Ретраев здесь нет: обновление цепочки — это подстройка на будущее,
         а не выдача трека прямо сейчас, поэтому любая ошибка (`BotError`,
@@ -310,7 +326,7 @@ class WaveSession:
         feedbacks = self._drain_pending_feedbacks()
         try:
             batch = await self._client.fetch_session_tracks(
-                queue=[after_track_id], feedbacks=feedbacks
+                queue=self._build_queue(after), feedbacks=feedbacks
             )
         except BotError as exc:
             self._requeue_feedbacks(feedbacks)
