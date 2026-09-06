@@ -4,7 +4,7 @@ import io
 import logging
 import sys
 
-from bot.logging_setup import SecretMaskingFilter, setup_logging
+from bot.logging_setup import _MAX_MESSAGE_LENGTH, SecretMaskingFilter, setup_logging
 
 
 class TestSecretMaskingFilter:
@@ -149,6 +149,110 @@ class TestSecretMaskingFilter:
             exc_info=None,
         )
         assert filter_obj.filter(record) is True
+
+    def test_short_message_not_truncated(self):
+        """Message shorter than limit passes through unchanged."""
+        filter_obj = SecretMaskingFilter([])
+        short_msg = "Hello world, this is a test message"
+        assert len(short_msg) < _MAX_MESSAGE_LENGTH
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg=short_msg,
+            args=(),
+            exc_info=None,
+        )
+        filter_obj.filter(record)
+        assert record.msg == short_msg
+        assert "обрезано" not in record.msg
+
+    def test_long_message_truncated(self):
+        """Message longer than limit is truncated with suffix."""
+        filter_obj = SecretMaskingFilter([])
+        long_msg = "A" * 600  # 600 > 500, so it will be truncated
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg=long_msg,
+            args=(),
+            exc_info=None,
+        )
+        filter_obj.filter(record)
+        assert "обрезано" in record.msg
+        assert "600" in record.msg
+        assert len(record.msg) <= _MAX_MESSAGE_LENGTH + 30  # Allow for suffix
+
+    def test_message_exactly_at_limit_not_truncated(self):
+        """Message with length exactly equal to limit is not truncated."""
+        filter_obj = SecretMaskingFilter([])
+        exact_msg = "X" * _MAX_MESSAGE_LENGTH
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg=exact_msg,
+            args=(),
+            exc_info=None,
+        )
+        filter_obj.filter(record)
+        assert record.msg == exact_msg
+        assert "обрезано" not in record.msg
+
+    def test_secret_masked_before_truncation(self):
+        """Secret in truncated portion is masked before truncation occurs."""
+        secret = "super-secret-token-123456"
+        filter_obj = SecretMaskingFilter([secret])
+        # Build message: part before limit, then secret that falls into truncated portion
+        safe_part = "X" * (_MAX_MESSAGE_LENGTH - 10)
+        secret_part = secret + "Y" * 50
+        long_msg = safe_part + secret_part
+        assert len(long_msg) > _MAX_MESSAGE_LENGTH
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg=long_msg,
+            args=(),
+            exc_info=None,
+        )
+        filter_obj.filter(record)
+        # Secret must not appear anywhere in the record
+        assert secret not in record.msg
+        # Check that masking occurred
+        assert "***" in record.msg
+
+    def test_traceback_not_truncated(self):
+        """Traceback in exc_text is masked but not truncated."""
+        secret = "traceback-secret-token-abcdef"
+        filter_obj = SecretMaskingFilter([secret])
+        try:
+            raise ValueError(f"Error with {secret} and " + "X" * 1000)
+        except ValueError:
+            exc_info = sys.exc_info()
+
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname="test.py",
+            lineno=1,
+            msg="Exception",
+            args=(),
+            exc_info=exc_info,
+        )
+        filter_obj.filter(record)
+        # exc_text should be present
+        assert record.exc_text is not None
+        # Secret should be masked
+        assert secret not in record.exc_text
+        assert "***" in record.exc_text
+        # Traceback should not be truncated (no "обрезано" suffix)
+        assert "обрезано" not in record.exc_text
 
 
 class TestSetupLogging:

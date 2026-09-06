@@ -12,11 +12,19 @@ from typing import TextIO
 _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 _MIN_SECRET_LENGTH = 8
 _MASK = "***"
+_MAX_MESSAGE_LENGTH = 500
 _NOISY_LOGGER_NAMES = ("discord", "discord.gateway", "discord.voice_client", "yandex_music")
 
 
 class SecretMaskingFilter(logging.Filter):
-    """Заменяет вхождения секретов в отформатированном сообщении на '***'."""
+    """Маскирует секреты в отформатированном сообщении и ограничивает его длину.
+
+    Секреты заменяются на '***', чтобы не попасть в лог в открытом виде.
+    Длина сообщения ограничена отдельно: API Яндекса при ответе 429 кладёт
+    в текст исключения целую HTML-страницу (капча, счётчик метрики, inline-
+    скрипты) размером в несколько килобайт, и без ограничения одна такая
+    запись делает лог нечитаемым.
+    """
 
     def __init__(self, secrets: Iterable[str]) -> None:
         """Запоминает секреты для маскирования; пустые и короткие (< 8 символов) игнорируются."""
@@ -26,13 +34,19 @@ class SecretMaskingFilter(logging.Filter):
         ]
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Подставляет args, маскирует секреты в сообщении и очищает args. Возвращает True."""
+        """Подставляет args, маскирует секреты и обрезает сообщение до предельной длины.
+
+        Маскирование выполняется строго до обрезки: если бы порядок был обратным,
+        секрет мог бы частично уцелеть в отброшенном хвосте. exc_text и
+        stack_info не обрезаются — трейсбеки бывают длинными законно и нужны
+        для диагностики целиком. Возвращает True.
+        """
         try:
             message = record.getMessage()
         except Exception:
             message = str(record.msg)
 
-        record.msg = self._mask(message)
+        record.msg = self._truncate(self._mask(message))
         record.args = None
 
         if record.exc_info:
@@ -49,6 +63,13 @@ class SecretMaskingFilter(logging.Filter):
         for secret in self._secrets:
             text = text.replace(secret, _MASK)
         return text
+
+    def _truncate(self, text: str) -> str:
+        """Обрезает текст до `_MAX_MESSAGE_LENGTH` символов с пометкой об обрезке."""
+        if len(text) <= _MAX_MESSAGE_LENGTH:
+            return text
+        original_length = len(text)
+        return f"{text[:_MAX_MESSAGE_LENGTH]}… [обрезано, всего {original_length} симв.]"
 
 
 def _console_stream() -> TextIO:
