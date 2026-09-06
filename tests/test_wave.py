@@ -1106,3 +1106,88 @@ class TestWaveSessionRetrySchedule:
 
         assert delays == [1.0, 2.0, 4.0]
         assert len(delays) == WaveSession.MAX_FETCH_ATTEMPTS - 1
+
+
+class TestWaveSessionFeedbackContent:
+    """Тесты что фидбеки содержат правильный feedback_id в trackId."""
+
+    @pytest.mark.asyncio
+    async def test_track_started_uses_feedback_id_not_id(self):
+        """track_started() использует feedback_id в trackId.
+
+        Регрессионный тест: если будет использован track.id вместо track.feedback_id,
+        тест упадёт благодаря различающимся id и feedback_id тестового трека.
+        """
+        # Трек с явно различающимся id ("111") и feedback_id ("111:222")
+        track = make_track("111", feedback_id="111:222")
+        batch = WaveBatch(batch_id="batch1", tracks=(track,))
+        batch2 = WaveBatch(batch_id="batch2", tracks=(make_track("2"),))
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch, batch2]
+        session = WaveSession(client)
+
+        await session.start()
+        current_track = await session.next_track()
+        await session.track_started(current_track)
+        await session.next_track()
+
+        fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
+        feedbacks_with_started = [
+            f for f in fetch_calls[-1][2]
+            if f.get("event", {}).get("type") == "trackStarted"
+        ]
+        assert len(feedbacks_with_started) > 0
+        # Проверяем что trackId содержит feedback_id, а не просто id
+        assert feedbacks_with_started[0]["event"]["trackId"] == "111:222", (
+            f"trackId должен быть '111:222' (feedback_id), получено "
+            f"{feedbacks_with_started[0]['event']['trackId']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_track_finished_uses_feedback_id_not_id(self):
+        """track_finished() использует feedback_id в trackId."""
+        track = make_track("333", feedback_id="333:444")
+        batch = WaveBatch(batch_id="batch1", tracks=(track,))
+        batch2 = WaveBatch(batch_id="batch2", tracks=(make_track("2"),))
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch, batch2]
+        session = WaveSession(client)
+
+        await session.start()
+        current_track = await session.next_track()
+        await session.track_finished(current_track, 42.5)
+        await session.next_track()
+
+        fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
+        feedbacks_with_finished = [
+            f for f in fetch_calls[-1][2]
+            if f.get("event", {}).get("type") == "trackFinished"
+        ]
+        assert len(feedbacks_with_finished) > 0
+        assert feedbacks_with_finished[0]["event"]["trackId"] == "333:444"
+
+    @pytest.mark.asyncio
+    async def test_track_skipped_uses_feedback_id_not_id(self):
+        """track_skipped() использует feedback_id в trackId."""
+        track = make_track("555", feedback_id="555:666")
+        batch = WaveBatch(batch_id="batch1", tracks=(track,))
+        batch2 = WaveBatch(batch_id="batch2", tracks=(make_track("2"),))
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch, batch2]
+        session = WaveSession(client)
+
+        await session.start()
+        current_track = await session.next_track()
+        await session.track_skipped(current_track, 10.0)
+        await session.next_track()
+
+        fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
+        feedbacks_with_skip = [
+            f for f in fetch_calls[-1][2]
+            if f.get("event", {}).get("type") == "skip"
+        ]
+        assert len(feedbacks_with_skip) > 0
+        assert feedbacks_with_skip[0]["event"]["trackId"] == "555:666"

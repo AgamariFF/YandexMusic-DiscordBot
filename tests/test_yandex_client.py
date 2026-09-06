@@ -710,3 +710,125 @@ class TestBuildFeedback:
         payload = call_args[1]["json"]
         assert "feedbacks" in payload
         assert payload["feedbacks"] == feedbacks
+
+
+class TestStartSessionRadioStartedFeedback:
+    """Тесты что radioStarted отправляется при start_session."""
+
+    @pytest.mark.asyncio
+    async def test_start_session_sends_radio_started_feedback(self):
+        """start_session() отправляет radioStarted фидбек после создания сессии."""
+        mock_session_new_response = {
+            "radioSessionId": "sid123",
+            "batchId": "b1",
+            "sequence": [],
+        }
+
+        mock_client_obj = MagicMock()
+        mock_client_obj.base_url = "https://api.music.yandex.net"
+        mock_client_obj.request = MagicMock()
+
+        send_feedbacks_calls = []
+
+        async def capture_post(url, **kwargs):
+            if "feedback" in url:
+                send_feedbacks_calls.append((url, kwargs))
+            return mock_session_new_response
+
+        mock_client_obj.request.post = AsyncMock(side_effect=capture_post)
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client_obj)
+
+        await client.start_session()
+
+        # Проверяем что feedback был отправлен (это будет вызов send_feedbacks)
+        assert len(send_feedbacks_calls) > 0, (
+            "После start_session должен быть вызов для отправки radioStarted фидбека"
+        )
+
+
+class TestSessionNewRequestBody:
+    """Тесты что session/new содержит правильные поля."""
+
+    @pytest.mark.asyncio
+    async def test_session_new_includes_include_wave_model_and_interactive(self):
+        """session/new запрос содержит includeWaveModel и interactive."""
+        mock_client_obj = MagicMock()
+        mock_client_obj.base_url = "https://api.music.yandex.net"
+        mock_client_obj.request = MagicMock()
+
+        post_calls = []
+
+        async def capture_post(url, **kwargs):
+            post_calls.append((url, kwargs))
+            return {"radioSessionId": "sid123", "batchId": "b1", "sequence": []}
+
+        mock_client_obj.request.post = AsyncMock(side_effect=capture_post)
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client_obj)
+
+        await client.start_session()
+
+        # Находим вызов session/new
+        session_new_calls = [
+            (url, kwargs) for url, kwargs in post_calls
+            if "session/new" in url
+        ]
+        assert len(session_new_calls) > 0
+
+        call_url, call_kwargs = session_new_calls[0]
+        json_body = call_kwargs.get("json", {})
+
+        assert "includeWaveModel" in json_body, (
+            f"session/new должен содержать includeWaveModel, получено {json_body.keys()}"
+        )
+        assert json_body["includeWaveModel"] is True
+
+        assert "interactive" in json_body, (
+            f"session/new должен содержать interactive, получено {json_body.keys()}"
+        )
+        assert json_body["interactive"] is True
+
+
+class TestFeedbackIdWithoutAlbum:
+    """Тесты что feedback_id собирается правильно для трека без альбома."""
+
+    @pytest.mark.asyncio
+    async def test_feedback_id_fallback_without_album(self):
+        """Трек без альбомов использует str(track_id) как feedback_id."""
+        # Трек без поля albums (или с пустым списком)
+        track_no_album = SimpleNamespace(
+            id="777",
+            title="No Album Track",
+            artists=[SimpleNamespace(name="Artist")],
+            duration_ms=180000,
+            available=True,
+            albums=[],  # Пустой список альбомов
+        )
+
+        raw = {
+            "batchId": "batch1",
+            "sequence": [{"track": track_no_album}],
+        }
+
+        mock_client_obj = MagicMock()
+        mock_client_obj.base_url = "https://api.music.yandex.net"
+        mock_client_obj.request = MagicMock()
+        mock_client_obj.request.post = AsyncMock(return_value=raw)
+
+        client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
+        set_mock_client(client, mock_client_obj)
+
+        with patch("bot.yandex.client.Track.de_json", return_value=track_no_album):
+            batch = await client.fetch_session_tracks(queue=[], feedbacks=[])
+
+        # Проверяем что feedback_id построен правильно (без альбома)
+        assert len(batch.tracks) == 1
+        # Когда альбомов нет, feedback_id должен быть просто str(id)
+        assert batch.tracks[0].feedback_id == "777", (
+            f"Без альбома feedback_id должен быть '777', получено "
+            f"{batch.tracks[0].feedback_id}"
+        )
