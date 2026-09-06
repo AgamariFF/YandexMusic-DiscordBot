@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
-from yandex_music import ClientAsync
+from yandex_music import ClientAsync, StationTracksResult
 from yandex_music.exceptions import UnauthorizedError, YandexMusicError
 
 from bot.errors import TrackUnavailableError, WaveUnavailableError, YandexAuthError
@@ -112,12 +113,10 @@ class YandexMusicClient:
         (`UnauthorizedError`) тоже остаётся фатальным: иначе пользователь
         увидел бы «волна недоступна» и не узнал, что токен пора перевыпустить.
         """
-        client = self._require_client()
+        self._require_client()
         logger.info("Старт станции волны %s", self._station)
         try:
-            await client.rotor_station_feedback_radio_started(
-                self._station, from_, batch_id=batch_id
-            )
+            await self._send_feedback("radioStarted", batch_id=batch_id, from_=from_)
         except UnauthorizedError as exc:
             logger.error(
                 "Токен Яндекса отклонён при старте станции волны: %s: %s",
@@ -132,7 +131,16 @@ class YandexMusicClient:
         """Запрашивает очередную пачку треков волны."""
         client = self._require_client()
         try:
-            result = await client.rotor_station_tracks(self._station, queue=queue)
+            # rotor_station_tracks() библиотеки перезаписывает params вместо
+            # обновления: при переданном queue параметр settings2 теряется,
+            # хотя официальные клиенты всегда шлют его вместе с queue. Поэтому
+            # запрос собирается здесь напрямую, с обоими параметрами сразу.
+            url = f"{client.base_url}/rotor/station/{self._station}/tracks"
+            params: dict[str, Any] = {"settings2": "True"}
+            if queue is not None:
+                params["queue"] = queue
+            raw_result = await client._request.get(url, params)
+            result = StationTracksResult.de_json(raw_result, client)
         except UnauthorizedError as exc:
             logger.error(
                 "Не удалось получить пачку треков волны: %s: %s", type(exc).__name__, exc
@@ -192,13 +200,41 @@ class YandexMusicClient:
             exc,
         )
 
+    async def _send_feedback(
+        self,
+        type_: str,
+        *,
+        batch_id: str | None = None,
+        track_id: str | None = None,
+        total_played_seconds: float | None = None,
+        from_: str | None = None,
+    ) -> None:
+        """Отправляет фидбек rotor напрямую в формате JSON.
+
+        Библиотека `yandex-music` отправляет тело фидбека как
+        `application/x-www-form-urlencoded`, а сервер Яндекс.Музыки принимает
+        только JSON и на форму отвечает `400 condition is not met` на любой
+        тип фидбека. Поэтому запрос собирается здесь вручную, но выполняется
+        через приватный `_request` библиотечного клиента — он несёт
+        авторизацию и заголовки, менять нужно только тело и его кодирование.
+        """
+        client = self._require_client()
+        url = f"{client.base_url}/rotor/station/{self._station}/feedback"
+        params = {"batch-id": batch_id} if batch_id else {}
+        payload: dict[str, Any] = {"type": type_, "timestamp": datetime.now().timestamp()}
+        if track_id is not None:
+            payload["trackId"] = track_id
+        if total_played_seconds is not None:
+            payload["totalPlayedSeconds"] = total_played_seconds
+        if from_ is not None:
+            payload["from"] = from_
+        logger.debug("Отправка фидбека rotor: type=%s track_id=%s", type_, track_id)
+        await client._request.post(url, params=params, json=payload)
+
     async def notify_track_started(self, track_id: str, batch_id: str | None) -> None:
         """Сообщает API о начале воспроизведения трека."""
         try:
-            client = self._require_client()
-            await client.rotor_station_feedback_track_started(
-                self._station, track_id, batch_id=batch_id
-            )
+            await self._send_feedback("trackStarted", track_id=track_id, batch_id=batch_id)
         except Exception as exc:
             self._log_feedback_failure(f"старт трека {track_id}", exc)
 
@@ -207,9 +243,11 @@ class YandexMusicClient:
     ) -> None:
         """Сообщает API об окончании воспроизведения трека."""
         try:
-            client = self._require_client()
-            await client.rotor_station_feedback_track_finished(
-                self._station, track_id, played_seconds, batch_id=batch_id
+            await self._send_feedback(
+                "trackFinished",
+                track_id=track_id,
+                total_played_seconds=played_seconds,
+                batch_id=batch_id,
             )
         except Exception as exc:
             self._log_feedback_failure(f"завершение трека {track_id}", exc)
@@ -219,9 +257,11 @@ class YandexMusicClient:
     ) -> None:
         """Сообщает API о пропуске трека."""
         try:
-            client = self._require_client()
-            await client.rotor_station_feedback_skip(
-                self._station, track_id, played_seconds, batch_id=batch_id
+            await self._send_feedback(
+                "skip",
+                track_id=track_id,
+                total_played_seconds=played_seconds,
+                batch_id=batch_id,
             )
         except Exception as exc:
             self._log_feedback_failure(f"пропуск трека {track_id}", exc)
