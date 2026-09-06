@@ -11,6 +11,7 @@ from bot.yandex.client import (
     WAVE_STATION_ID,
     TrackInfo,
     YandexMusicClient,
+    build_feedback,
 )
 
 
@@ -47,61 +48,61 @@ class TestYandexMusicClientBasics:
 
 class TestYandexMusicClientConnect:
     @pytest.mark.asyncio
-    async def test_fetch_without_connect_raises_error(self):
-        """fetch_wave_batch without connect raises WaveUnavailableError."""
+    async def test_start_session_without_connect_raises_error(self):
+        """start_session() без connect() выбрасывает WaveUnavailableError."""
         client = YandexMusicClient("token123")
-        # Don't connect - client._client stays None
 
         with pytest.raises(WaveUnavailableError):
-            await client.fetch_wave_batch()
+            await client.start_session()
+
+    @pytest.mark.asyncio
+    async def test_fetch_session_tracks_without_connect_raises_error(self):
+        """fetch_session_tracks() без connect() выбрасывает WaveUnavailableError."""
+        client = YandexMusicClient("token123")
+
+        with pytest.raises(WaveUnavailableError):
+            await client.fetch_session_tracks(queue=[], feedbacks=[])
 
 
-class TestYandexMusicClientFetchBatch:
-    """Tests for fetch_wave_batch."""
+class TestYandexMusicClientFetchSessionTracks:
+    """Тесты для fetch_session_tracks()."""
 
     @pytest.mark.asyncio
     async def test_fetch_none_result_returns_empty_batch(self):
-        """fetch_wave_batch returning None → empty WaveBatch."""
+        """fetch_session_tracks с None → пустой WaveBatch."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
         mock_client.request = MagicMock()
-        mock_client.request.get = AsyncMock(return_value=None)
+        mock_client.request.post = AsyncMock(return_value=None)
 
         client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
         set_mock_client(client, mock_client)
 
-        with patch(
-            "bot.yandex.client.StationTracksResult.de_json",
-            return_value=None,
-        ):
-            batch = await client.fetch_wave_batch()
+        batch = await client.fetch_session_tracks(queue=[], feedbacks=[])
         assert batch.batch_id is None
         assert batch.tracks == ()
 
     @pytest.mark.asyncio
     async def test_fetch_empty_sequence_returns_empty_batch(self):
-        """fetch_wave_batch with empty sequence → empty WaveBatch."""
+        """fetch_session_tracks с пустой sequence → пустой WaveBatch."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        raw = {}
+        raw = {"batchId": "batch1", "sequence": []}
         mock_client.request = MagicMock()
-        mock_client.request.get = AsyncMock(return_value=raw)
+        mock_client.request.post = AsyncMock(return_value=raw)
 
         client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
         set_mock_client(client, mock_client)
 
-        with patch(
-            "bot.yandex.client.StationTracksResult.de_json",
-            return_value=SimpleNamespace(sequence=[], batch_id="batch1"),
-        ) as de_json_mock:
-            batch = await client.fetch_wave_batch()
+        batch = await client.fetch_session_tracks(queue=[], feedbacks=[])
         assert batch.batch_id == "batch1"
         assert batch.tracks == ()
-        assert de_json_mock.call_args[0][0] is raw
 
     @pytest.mark.asyncio
     async def test_fetch_filters_unavailable_tracks(self):
-        """fetch_wave_batch filters out unavailable and None tracks."""
+        """fetch_session_tracks фильтрует недоступные и элементы без track."""
         track1 = SimpleNamespace(
             id="1",
             title="Song1",
@@ -109,7 +110,6 @@ class TestYandexMusicClientFetchBatch:
             duration_ms=180000,
             available=True,
         )
-        track2 = None
         track3 = SimpleNamespace(
             id="3",
             title="Song3",
@@ -125,41 +125,38 @@ class TestYandexMusicClientFetchBatch:
             available=True,
         )
 
-        result_tracks = SimpleNamespace(
-            sequence=[
-                SimpleNamespace(track=track1),
-                SimpleNamespace(track=track2),
-                SimpleNamespace(track=track3),
-                SimpleNamespace(track=track4),
+        raw = {
+            "batchId": "batch1",
+            "sequence": [
+                {"track": track1},
+                {},  # элемент без track
+                {"track": track3},
+                {"track": track4},
             ],
-            batch_id="batch1",
-        )
+        }
 
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        raw = {}
         mock_client.request = MagicMock()
-        mock_client.request.get = AsyncMock(return_value=raw)
+        mock_client.request.post = AsyncMock(return_value=raw)
 
         client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
         set_mock_client(client, mock_client)
 
-        with patch(
-            "bot.yandex.client.StationTracksResult.de_json",
-            return_value=result_tracks,
-        ) as de_json_mock:
-            batch = await client.fetch_wave_batch()
+        with patch("bot.yandex.client.Track.de_json") as track_de_json:
+            track_de_json.side_effect = [track1, track3, track4]
+            batch = await client.fetch_session_tracks(queue=[], feedbacks=[])
 
         assert len(batch.tracks) == 2
         assert batch.tracks[0].id == "1"
         assert batch.tracks[0].title == "Song1"
         assert batch.tracks[0].duration == 180.0
         assert batch.tracks[1].id == "4"
-        assert de_json_mock.call_args[0][0] is raw
 
     @pytest.mark.asyncio
     async def test_fetch_artists_joined(self):
-        """Artists are joined with ', '."""
+        """Артисты объединяются с ', '."""
         track = SimpleNamespace(
             id="1",
             title="Song",
@@ -170,29 +167,28 @@ class TestYandexMusicClientFetchBatch:
             duration_ms=180000,
             available=True,
         )
-        result = SimpleNamespace(
-            sequence=[SimpleNamespace(track=track)],
-            batch_id="batch1",
-        )
+        raw = {
+            "batchId": "batch1",
+            "sequence": [{"track": track}],
+        }
 
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
         mock_client.request = MagicMock()
-        mock_client.request.get = AsyncMock(return_value={})
+        mock_client.request.post = AsyncMock(return_value=raw)
 
         client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
         set_mock_client(client, mock_client)
 
-        with patch(
-            "bot.yandex.client.StationTracksResult.de_json", return_value=result
-        ):
-            batch = await client.fetch_wave_batch()
+        with patch("bot.yandex.client.Track.de_json", return_value=track):
+            batch = await client.fetch_session_tracks(queue=[], feedbacks=[])
 
         assert batch.tracks[0].artists == "Artist1, Artist2"
 
     @pytest.mark.asyncio
     async def test_fetch_empty_artists_fallback(self):
-        """Empty artists list → fallback string."""
+        """Пустой список артистов → запасная строка."""
         track = SimpleNamespace(
             id="1",
             title="Song",
@@ -200,71 +196,116 @@ class TestYandexMusicClientFetchBatch:
             duration_ms=180000,
             available=True,
         )
-        result = SimpleNamespace(
-            sequence=[SimpleNamespace(track=track)],
-            batch_id="batch1",
-        )
+        raw = {
+            "batchId": "batch1",
+            "sequence": [{"track": track}],
+        }
 
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
         mock_client.request = MagicMock()
-        mock_client.request.get = AsyncMock(return_value={})
+        mock_client.request.post = AsyncMock(return_value=raw)
 
         client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
         set_mock_client(client, mock_client)
 
-        with patch(
-            "bot.yandex.client.StationTracksResult.de_json", return_value=result
-        ):
-            batch = await client.fetch_wave_batch()
+        with patch("bot.yandex.client.Track.de_json", return_value=track):
+            batch = await client.fetch_session_tracks(queue=[], feedbacks=[])
 
         assert batch.tracks[0].artists != ""
 
 
-class TestYandexMusicClientNotify:
-    """Tests for notify_* methods."""
+class TestYandexMusicClientSendFeedbacks:
+    """Тесты для send_feedbacks()."""
 
     @pytest.mark.asyncio
-    async def test_notify_started_no_exception(self):
-        """notify_track_started doesn't raise on error."""
+    async def test_send_feedbacks_no_exception_on_error(self):
+        """send_feedbacks() не выбрасывает исключение при ошибке."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
         mock_client.request = MagicMock()
         mock_client.request.post = AsyncMock(side_effect=Exception("Network error"))
 
         client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
         set_mock_client(client, mock_client)
 
-        # Should not raise
-        await client.notify_track_started("track1", "batch1")
+        # Не должна выбросить исключение
+        await client.send_feedbacks([{"event": {"type": "skip"}}])
 
     @pytest.mark.asyncio
-    async def test_notify_finished_no_exception(self):
-        """notify_track_finished doesn't raise on error."""
+    async def test_send_empty_feedbacks_no_request(self):
+        """send_feedbacks([]) не делает запроса."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
         mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock(side_effect=Exception("Network error"))
+        mock_client.request.post = AsyncMock()
+
+        client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
+        set_mock_client(client, mock_client)
+
+        await client.send_feedbacks([])
+
+        assert not mock_client.request.post.called
+
+    @pytest.mark.asyncio
+    async def test_send_feedbacks_path_ends_with_slash(self):
+        """send_feedbacks() использует путь с завершающим слэшем."""
+        mock_client = MagicMock()
+        mock_client.base_url = "https://api.music.yandex.net"
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock()
+
+        client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
+        set_mock_client(client, mock_client)
+
+        await client.send_feedbacks([{"event": {"type": "skip"}}])
+
+        call_args = mock_client.request.post.call_args
+        url = call_args[0][0]
+        assert url.endswith("/feedbacks/"), (
+            f"URL должен заканчиваться на '/feedbacks/', получено {url}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_methods_use_json_not_data(self):
+        """Все методы передают тело как json=, а не data=.
+
+        Регрессионный тест: старая реализация отправляла как form-encoded,
+        сервер отвечал 400. Тело должно идти именованным аргументом json=.
+        """
+        mock_client = MagicMock()
+        mock_client.base_url = "https://api.music.yandex.net"
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock(
+            return_value={"radioSessionId": "sid", "batchId": "b1", "sequence": []}
+        )
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
 
-        # Should not raise
-        await client.notify_track_finished("track1", 10.0, "batch1")
+        await client.start_session()
+        call_args = mock_client.request.post.call_args
+        assert "json" in call_args[1], "start_session должен использовать json="
+        assert "data" not in call_args[1], "start_session не должен использовать data="
 
-    @pytest.mark.asyncio
-    async def test_notify_skipped_no_exception(self):
-        """notify_track_skipped doesn't raise on error."""
-        mock_client = MagicMock()
-        mock_client.base_url = "https://api.music.yandex.net"
-        mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock(side_effect=Exception("Network error"))
+        mock_client.request.post.reset_mock()
+        mock_client.request.post.return_value = {"batchId": "b2", "sequence": []}
+        client._radio_session_id = "session123"
 
-        client = YandexMusicClient("token123")
-        set_mock_client(client, mock_client)
+        await client.fetch_session_tracks(queue=[], feedbacks=[])
+        call_args = mock_client.request.post.call_args
+        assert "json" in call_args[1], "fetch_session_tracks должен использовать json="
+        assert "data" not in call_args[1], "fetch_session_tracks не должен использовать data="
 
-        # Should not raise
-        await client.notify_track_skipped("track1", 10.0, "batch1")
+        mock_client.request.post.reset_mock()
+        await client.send_feedbacks([{"event": {"type": "skip"}}])
+        call_args = mock_client.request.post.call_args
+        assert "json" in call_args[1], "send_feedbacks должен использовать json="
+        assert "data" not in call_args[1], "send_feedbacks не должен использовать data="
 
 
 class TestYandexMusicClientResolveStream:
@@ -419,39 +460,49 @@ class TestYandexMusicClientClose:
         assert client.connected is False
 
 
-class TestYandexMusicClientStartWave:
-    """Tests for start_wave method."""
+class TestYandexMusicClientStartSession:
+    """Тесты для start_session()."""
 
     @pytest.mark.asyncio
-    async def test_start_wave_survives_feedback_rejection(self):
-        """Server rejects feedback with BadRequestError, but wave still starts.
-
-        Regression test for a production bug: when the Yandex API rejects
-        feedback sent via request.post with BadRequestError (condition is not
-        met), the wave is still playable, so start_wave() should NOT raise an
-        exception—only log a warning. Wave functionality must not depend on
-        optional feedback success.
-        """
+    async def test_start_session_success(self):
+        """Успешное создание сессии возвращает WaveBatch."""
+        raw = {
+            "radioSessionId": "session123",
+            "batchId": "batch1",
+            "sequence": [],
+        }
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
         mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock(
-            side_effect=yandex_music.exceptions.BadRequestError("condition is not met")
-        )
+        mock_client.request.post = AsyncMock(return_value=raw)
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
 
-        # Should not raise despite BadRequestError from feedback
-        await client.start_wave()
+        batch = await client.start_session()
+
+        assert batch.batch_id == "batch1"
+        assert batch.tracks == ()
+        assert client._radio_session_id == "session123"
 
     @pytest.mark.asyncio
-    async def test_start_wave_expired_token_still_raises_auth_error(self):
-        """An expired token stays fatal even though feedback failures are tolerated.
+    async def test_start_session_no_radio_session_id_raises_error(self):
+        """Если ответ не содержит radioSessionId → WaveUnavailableError."""
+        raw = {"batchId": "batch1", "sequence": []}
+        mock_client = MagicMock()
+        mock_client.base_url = "https://api.music.yandex.net"
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock(return_value=raw)
 
-        Otherwise the user would see "wave unavailable" and never learn that
-        the token must be reissued.
-        """
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        with pytest.raises(WaveUnavailableError):
+            await client.start_session()
+
+    @pytest.mark.asyncio
+    async def test_start_session_expired_token_raises_auth_error(self):
+        """Истёкший токен выбрасывает YandexAuthError."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
         mock_client.request = MagicMock()
@@ -463,253 +514,153 @@ class TestYandexMusicClientStartWave:
         set_mock_client(client, mock_client)
 
         with pytest.raises(YandexAuthError):
-            await client.start_wave()
+            await client.start_session()
 
     @pytest.mark.asyncio
-    async def test_start_wave_survives_network_error(self):
-        """Network error in feedback does not stop wave startup."""
+    async def test_fetch_session_tracks_without_session_raises_error(self):
+        """fetch_session_tracks без start_session() выбрасывает WaveUnavailableError."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock(
-            side_effect=yandex_music.exceptions.NetworkError("Connection timeout")
-        )
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
-
-        # Should not raise despite NetworkError from feedback
-        await client.start_wave()
-
-    @pytest.mark.asyncio
-    async def test_start_wave_survives_generic_exception(self):
-        """Generic Exception in feedback does not stop wave startup."""
-        mock_client = MagicMock()
-        mock_client.base_url = "https://api.music.yandex.net"
-        mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock(side_effect=Exception("Some error"))
-
-        client = YandexMusicClient("token123")
-        set_mock_client(client, mock_client)
-
-        # Should not raise despite generic exception
-        await client.start_wave()
-
-    @pytest.mark.asyncio
-    async def test_start_wave_without_client_raises_error(self):
-        """start_wave without connect raises WaveUnavailableError.
-
-        Unlike feedback errors, the absence of a client is a state error
-        that must bubble up.
-        """
-        client = YandexMusicClient("token123")
-        # Don't connect - client._client stays None
 
         with pytest.raises(WaveUnavailableError):
-            await client.start_wave()
+            await client.fetch_session_tracks(queue=[], feedbacks=[])
 
-    @pytest.mark.asyncio
-    async def test_start_wave_success(self):
-        """Successful feedback: start_wave does not raise and calls request.post."""
+
+class TestBuildFeedback:
+    """Тесты для функции build_feedback()."""
+
+    def test_build_feedback_radio_started(self):
+        """build_feedback для radioStarted имеет правильную структуру."""
+        feedback = build_feedback("radioStarted", batch_id="batch1", from_="custom_from")
+
+        assert "event" in feedback
+        assert feedback["event"]["type"] == "radioStarted"
+        assert "timestamp" in feedback["event"]
+        assert feedback["batchId"] == "batch1"
+        assert feedback["from"] == "custom_from"
+        assert "trackId" not in feedback["event"]
+
+    def test_build_feedback_track_started(self):
+        """build_feedback для trackStarted имеет trackId."""
+        feedback = build_feedback("trackStarted", batch_id="batch1", track_id="track123")
+
+        assert feedback["event"]["type"] == "trackStarted"
+        assert feedback["event"]["trackId"] == "track123"
+        assert feedback["batchId"] == "batch1"
+        assert "totalPlayedSeconds" not in feedback["event"]
+
+    def test_build_feedback_track_finished(self):
+        """build_feedback для trackFinished имеет totalPlayedSeconds и trackLengthSeconds."""
+        feedback = build_feedback(
+            "trackFinished",
+            batch_id="batch1",
+            track_id="track123",
+            total_played_seconds=42.5,
+            track_length_seconds=180.0,
+        )
+
+        assert feedback["event"]["type"] == "trackFinished"
+        assert feedback["event"]["trackId"] == "track123"
+        assert feedback["event"]["totalPlayedSeconds"] == 42.5
+        assert feedback["event"]["trackLengthSeconds"] == 180.0
+        assert feedback["batchId"] == "batch1"
+
+    def test_build_feedback_skip(self):
+        """build_feedback для skip имеет trackId и totalPlayedSeconds."""
+        feedback = build_feedback(
+            "skip",
+            batch_id="batch1",
+            track_id="track123",
+            total_played_seconds=10.0,
+        )
+
+        assert feedback["event"]["type"] == "skip"
+        assert feedback["event"]["trackId"] == "track123"
+        assert feedback["event"]["totalPlayedSeconds"] == 10.0
+        assert feedback["batchId"] == "batch1"
+
+    def test_build_feedback_none_values_not_included(self):
+        """build_feedback не включает ключи со значением None."""
+        feedback = build_feedback(
+            "trackStarted",
+            batch_id=None,
+            track_id="track1",
+            total_played_seconds=None,
+        )
+
+        assert "batchId" not in feedback
+        assert "totalPlayedSeconds" not in feedback["event"]
+        assert feedback["event"]["trackId"] == "track1"
+
+    def test_build_feedback_zero_still_included(self):
+        """build_feedback включает 0.0 (не фильтрует как falsy)."""
+        feedback = build_feedback(
+            "trackFinished",
+            batch_id="b1",
+            track_id="t1",
+            total_played_seconds=0.0,
+        )
+
+        assert "totalPlayedSeconds" in feedback["event"]
+        assert feedback["event"]["totalPlayedSeconds"] == 0.0
+
+    def test_build_feedback_structure_nested(self):
+        """build_feedback имеет полезную нагрузку во вложенном event."""
+        feedback = build_feedback(
+            "skip",
+            batch_id="batch1",
+            track_id="track1",
+            total_played_seconds=5.0,
+        )
+
+        assert isinstance(feedback["event"], dict)
+        assert feedback["event"]["type"] == "skip"
+        assert feedback["event"]["trackId"] == "track1"
+        assert feedback["event"]["totalPlayedSeconds"] == 5.0
+        # batchId и from - соседи на верхнем уровне, не в event
+        assert "batchId" in feedback
+        assert "trackId" not in feedback  # trackId в event, не в корне
+
+    def test_fetch_session_tracks_with_empty_feedbacks_no_key(self):
+        """Если feedbacks пуст, ключ feedbacks не добавляется в тело запроса."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
         mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock()
+        mock_client.request.post = AsyncMock(return_value={"batchId": "b1", "sequence": []})
 
+        from bot.yandex.client import YandexMusicClient
         client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
         set_mock_client(client, mock_client)
 
-        await client.start_wave()
-
-        # Verify request.post was called exactly once
-        assert mock_client.request.post.call_count == 1
-        # Check the URL contains the wave station ID
-        call_args = mock_client.request.post.call_args
-        url = call_args[0][0]
-        assert url.endswith(f"/rotor/station/{WAVE_STATION_ID}/feedback")
-        # Check json payload contains radioStarted type
-        assert call_args[1]["json"]["type"] == "radioStarted"
-
-    @pytest.mark.asyncio
-    async def test_start_wave_with_custom_params(self):
-        """start_wave passes from_ and batch_id to request.post."""
-        mock_client = MagicMock()
-        mock_client.base_url = "https://api.music.yandex.net"
-        mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock()
-
-        client = YandexMusicClient("token123")
-        set_mock_client(client, mock_client)
-
-        await client.start_wave(from_="custom_from", batch_id="custom_batch_id")
-
-        # Verify request.post was called with correct parameters
-        call_args = mock_client.request.post.call_args
-        # Check json payload contains custom from and correct type
-        assert call_args[1]["json"]["from"] == "custom_from"
-        assert call_args[1]["json"]["type"] == "radioStarted"
-        # Check params contain batch-id
-        assert call_args[1]["params"]["batch-id"] == "custom_batch_id"
-
-
-class TestFeedbackRegression:
-    """Regression tests for feedback implementation details."""
-
-    @pytest.mark.asyncio
-    async def test_feedback_sent_as_json_not_form(self):
-        """Feedback must be sent as JSON, not form data.
-
-        Regression test for a production bug where the old implementation
-        sent form-encoded feedback and received 400 errors from the server.
-        Now we send json as a named argument, not data=form.
-        """
-        mock_client = MagicMock()
-        mock_client.base_url = "https://api.music.yandex.net"
-        mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock()
-
-        client = YandexMusicClient("token123")
-        set_mock_client(client, mock_client)
-
-        await client.notify_track_started("track1", "batch1")
-
-        # Verify request.post was called with json argument, not data
-        call_args = mock_client.request.post.call_args
-        assert "json" in call_args[1]
-        assert "data" not in call_args[1]
-
-    @pytest.mark.asyncio
-    async def test_feedback_payload_fields_per_type(self):
-        """Each feedback type has correct required and optional fields."""
-        mock_client = MagicMock()
-        mock_client.base_url = "https://api.music.yandex.net"
-        mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock()
-
-        client = YandexMusicClient("token123")
-        set_mock_client(client, mock_client)
-
-        # Test radioStarted: has 'from', no trackId
-        await client.start_wave(from_="test_from", batch_id="batch0")
-        call_args = mock_client.request.post.call_args
-        payload = call_args[1]["json"]
-        assert payload["type"] == "radioStarted"
-        assert "timestamp" in payload
-        assert payload["from"] == "test_from"
-        assert "trackId" not in payload
-        assert call_args[1]["params"]["batch-id"] == "batch0"
-
-        # Test trackStarted: has trackId, no totalPlayedSeconds
-        mock_client.request.post.reset_mock()
-        await client.notify_track_started("track1", "batch1")
-        call_args = mock_client.request.post.call_args
-        payload = call_args[1]["json"]
-        assert payload["type"] == "trackStarted"
-        assert "timestamp" in payload
-        assert payload["trackId"] == "track1"
-        assert "totalPlayedSeconds" not in payload
-        assert call_args[1]["params"]["batch-id"] == "batch1"
-
-        # Test trackFinished: has trackId and totalPlayedSeconds
-        mock_client.request.post.reset_mock()
-        await client.notify_track_finished("track1", 42.5, "batch1")
-        call_args = mock_client.request.post.call_args
-        payload = call_args[1]["json"]
-        assert payload["type"] == "trackFinished"
-        assert "timestamp" in payload
-        assert payload["trackId"] == "track1"
-        assert payload["totalPlayedSeconds"] == 42.5
-        assert call_args[1]["params"]["batch-id"] == "batch1"
-
-        # Test skip: has trackId and totalPlayedSeconds
-        mock_client.request.post.reset_mock()
-        await client.notify_track_skipped("track1", 10.0, "batch1")
-        call_args = mock_client.request.post.call_args
-        payload = call_args[1]["json"]
-        assert payload["type"] == "skip"
-        assert "timestamp" in payload
-        assert payload["trackId"] == "track1"
-        assert payload["totalPlayedSeconds"] == 10.0
-        assert call_args[1]["params"]["batch-id"] == "batch1"
-
-    @pytest.mark.asyncio
-    async def test_skip_reports_played_seconds(self):
-        """skip feedback includes totalPlayedSeconds."""
-        mock_client = MagicMock()
-        mock_client.base_url = "https://api.music.yandex.net"
-        mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock()
-
-        client = YandexMusicClient("token123")
-        set_mock_client(client, mock_client)
-
-        await client.notify_track_skipped("t1", 12.5, "b1")
+        import asyncio
+        asyncio.run(client.fetch_session_tracks(queue=[], feedbacks=[]))
 
         call_args = mock_client.request.post.call_args
         payload = call_args[1]["json"]
-        assert payload["totalPlayedSeconds"] == 12.5
-        assert payload["type"] == "skip"
+        assert "feedbacks" not in payload
+        assert payload["queue"] == []
 
-    @pytest.mark.asyncio
-    async def test_fetch_always_sends_settings2(self):
-        """fetch_wave_batch always sends settings2 param.
-
-        Regression test: old library method overwrote params dict and lost
-        settings2 when a queue param was provided. New implementation must
-        always include settings2 in params.
-        """
+    def test_fetch_session_tracks_with_feedbacks_included(self):
+        """Если feedbacks не пуст, ключ feedbacks включается в тело запроса."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
         mock_client.request = MagicMock()
-        mock_client.request.get = AsyncMock(return_value={})
+        mock_client.request.post = AsyncMock(return_value={"batchId": "b1", "sequence": []})
 
+        from bot.yandex.client import YandexMusicClient
         client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
         set_mock_client(client, mock_client)
 
-        # Test without queue
-        with patch(
-            "bot.yandex.client.StationTracksResult.de_json",
-            return_value=SimpleNamespace(sequence=[], batch_id="batch1"),
-        ):
-            await client.fetch_wave_batch()
-
-        call_args = mock_client.request.get.call_args
-        # get is called positionally: await client.request.get(url, params)
-        params = call_args[0][1]
-        assert params["settings2"] == "True"
-        assert "queue" not in params
-
-        # Test with queue
-        mock_client.request.get.reset_mock()
-        with patch(
-            "bot.yandex.client.StationTracksResult.de_json",
-            return_value=SimpleNamespace(sequence=[], batch_id="batch2"),
-        ):
-            await client.fetch_wave_batch(queue="queue123")
-
-        call_args = mock_client.request.get.call_args
-        # get is called positionally: await client.request.get(url, params)
-        params = call_args[0][1]
-        assert params["settings2"] == "True"
-        assert params["queue"] == "queue123"
-
-    @pytest.mark.asyncio
-    async def test_zero_played_seconds_still_sent(self):
-        """totalPlayedSeconds=0.0 is still included in payload.
-
-        Regression test: code must not filter out 0 as falsy value.
-        """
-        mock_client = MagicMock()
-        mock_client.base_url = "https://api.music.yandex.net"
-        mock_client.request = MagicMock()
-        mock_client.request.post = AsyncMock()
-
-        client = YandexMusicClient("token123")
-        set_mock_client(client, mock_client)
-
-        await client.notify_track_finished("t1", 0.0, "b1")
+        feedbacks = [{"event": {"type": "skip"}}]
+        import asyncio
+        asyncio.run(client.fetch_session_tracks(queue=[], feedbacks=feedbacks))
 
         call_args = mock_client.request.post.call_args
         payload = call_args[1]["json"]
-        assert "totalPlayedSeconds" in payload
-        assert payload["totalPlayedSeconds"] == 0.0
+        assert "feedbacks" in payload
+        assert payload["feedbacks"] == feedbacks
