@@ -880,8 +880,8 @@ class TestWaveSessionNetworkResilience:
 
         При сбое fetch_session_tracks фидбеки возвращаются в начало очереди,
         сохраняя исходный порядок (через extendleft с reversed), и уходят
-        со следующей успешной попытки. Тест проверяет именно порядок,
-        для чего использует минимум 3 фидбека.
+        со следующей успешной попытки. Одно нечётное падение обеспечивает
+        видимость одного разворота: без reversed тест упадёт.
         """
         async def fake_sleep(_):
             return None
@@ -893,23 +893,24 @@ class TestWaveSessionNetworkResilience:
 
         attempt_count = {"count": 0}
 
-        async def fetch_handler_with_error(queue, batch_index, client):
+        async def fetch_handler(queue, batch_index, client):
             attempt_count["count"] += 1
-            if attempt_count["count"] <= 2:
-                raise WaveUnavailableError(user_message="Network error")
-            if attempt_count["count"] == 3:
+            if attempt_count["count"] == 1:
                 return batch1
+            if attempt_count["count"] == 2:
+                return WaveBatch(batch_id=None, tracks=())
+            if attempt_count["count"] == 3:
+                raise WaveUnavailableError(user_message="Network error")
             if attempt_count["count"] == 4:
                 return batch2
             return WaveBatch(batch_id=None, tracks=())
 
         client = FakeMusicClient()
-        client.fetch_handler = fetch_handler_with_error
+        client.fetch_handler = fetch_handler
         session = WaveSession(client)
 
         await session.start()
         track1 = await session.next_track()
-        assert track1.id == "1"
 
         await session.track_started(track1)
         await session.track_finished(track1, 42.5)
@@ -918,15 +919,19 @@ class TestWaveSessionNetworkResilience:
         await session.next_track()
 
         fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
-        final_fetch = fetch_calls[-1]
-        feedbacks = final_fetch[2]
+        feedback_calls = [c for c in fetch_calls if len(c[2]) == 3]
+        assert len(feedback_calls) >= 2, (
+            "Должно быть минимум 2 попытки отправить фидбеки "
+            "(первая падает, вторая успешна)"
+        )
 
-        assert len(feedbacks) == 3, f"Должно быть 3 фидбека, получено {len(feedbacks)}"
+        successfully_sent = feedback_calls[-1]
+        feedbacks = successfully_sent[2]
 
         types = [f["event"]["type"] for f in feedbacks]
         assert types == ["trackStarted", "trackFinished", "skip"], (
-            f"Фидбеки должны быть в порядке (trackStarted, trackFinished, skip), "
-            f"получено {types}"
+            f"Фидбеки после ошибки должны быть в исходном порядке "
+            f"(trackStarted, trackFinished, skip), получено {types}"
         )
 
 
