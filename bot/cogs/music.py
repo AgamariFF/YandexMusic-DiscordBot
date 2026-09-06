@@ -112,6 +112,19 @@ class MusicCog(commands.Cog, name="Музыка"):
         else:
             await interaction.response.send_message(text, ephemeral=True)
 
+    async def _start_wave(self, interaction: discord.Interaction) -> None:
+        """Запускает «Мою волну», при необходимости подключаясь к каналу пользователя."""
+        await interaction.response.defer()
+        if self._player.voice_client is None:
+            channel = _voice_channel_of(interaction)
+            await self._player.connect(channel)
+        self._announce_channel = interaction.channel
+        track = await self._player.start_wave()
+        embed = discord.Embed(
+            title="«Моя волна» запущена", description=track.display, color=EMBED_COLOR
+        )
+        await interaction.followup.send(embed=embed)
+
     @app_commands.command(name="join", description="Подключиться к голосовому каналу")
     @app_commands.guild_only()
     async def join(self, interaction: discord.Interaction) -> None:
@@ -133,16 +146,13 @@ class MusicCog(commands.Cog, name="Музыка"):
     @app_commands.guild_only()
     async def wave(self, interaction: discord.Interaction) -> None:
         """Запускает «Мою волну», при необходимости подключаясь к каналу пользователя."""
-        await interaction.response.defer()
-        if self._player.voice_client is None:
-            channel = _voice_channel_of(interaction)
-            await self._player.connect(channel)
-        self._announce_channel = interaction.channel
-        track = await self._player.start_wave()
-        embed = discord.Embed(
-            title="«Моя волна» запущена", description=track.display, color=EMBED_COLOR
-        )
-        await interaction.followup.send(embed=embed)
+        await self._start_wave(interaction)
+
+    @app_commands.command(name="play", description="Запустить «Мою волну»")
+    @app_commands.guild_only()
+    async def play(self, interaction: discord.Interaction) -> None:
+        """Запускает «Мою волну», при необходимости подключаясь к каналу пользователя."""
+        await self._start_wave(interaction)
 
     @app_commands.command(name="skip", description="Пропустить текущий трек")
     @app_commands.guild_only()
