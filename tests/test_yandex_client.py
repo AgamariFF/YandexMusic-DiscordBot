@@ -832,3 +832,45 @@ class TestFeedbackIdWithoutAlbum:
             f"Без альбома feedback_id должен быть '777', получено "
             f"{batch.tracks[0].feedback_id}"
         )
+
+    @pytest.mark.asyncio
+    async def test_feedback_id_with_album(self):
+        """Трек с альбомом использует <track_id>:<album_id> как feedback_id.
+
+        Это основной случай сборки составного идентификатора.
+        При мутации album_id = None тест должен упасть.
+        """
+        # Трек с альбомом: id="999", album.id="888" (явно различаются)
+        track_with_album = SimpleNamespace(
+            id="999",
+            title="Album Track",
+            artists=[SimpleNamespace(name="Artist")],
+            duration_ms=180000,
+            available=True,
+            albums=[SimpleNamespace(id="888")],  # Трек имеет альбом
+        )
+
+        raw = {
+            "batchId": "batch1",
+            "sequence": [{"track": track_with_album}],
+        }
+
+        mock_client_obj = MagicMock()
+        mock_client_obj.base_url = "https://api.music.yandex.net"
+        mock_client_obj.request = MagicMock()
+        mock_client_obj.request.post = AsyncMock(return_value=raw)
+
+        client = YandexMusicClient("token123")
+        client._radio_session_id = "session123"
+        set_mock_client(client, mock_client_obj)
+
+        with patch("bot.yandex.client.Track.de_json", return_value=track_with_album):
+            batch = await client.fetch_session_tracks(queue=[], feedbacks=[])
+
+        # Проверяем что feedback_id собран правильно (с альбомом)
+        assert len(batch.tracks) == 1
+        # Должен быть составной идентификатор <track_id>:<album_id>
+        assert batch.tracks[0].feedback_id == "999:888", (
+            f"С альбомом feedback_id должен быть '999:888', получено "
+            f"{batch.tracks[0].feedback_id}"
+        )
