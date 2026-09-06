@@ -20,6 +20,8 @@ import itertools
 import json
 import re
 import sys
+import traceback
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +34,9 @@ CDP_HOST = "127.0.0.1"
 CDP_PORT = 9222
 CDP_TARGETS_URL = f"http://{CDP_HOST}:{CDP_PORT}/json"
 CDP_CALL_TIMEOUT = 10
+# Пауза между повторными опросами /json в поисках целей, появившихся после старта
+# (например, новый worker, созданный приложением уже во время наблюдения).
+CDP_POLL_INTERVAL = 3
 
 LOG_FILE = Path("logs/yandex_cdp.jsonl")
 FILTER_HOST_SUBSTRING = "music.yandex"
@@ -281,14 +286,22 @@ async def _watch_target(
     """
     ws_url = target.get("webSocketDebuggerUrl", "")
     title = target.get("title") or target.get("id") or ws_url
+    target_type = target.get("type", "?")
     try:
         async with session.ws_connect(ws_url, max_msg_size=0) as ws:
             requests: dict[str, dict[str, Any]] = {}
             pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
             command_id = itertools.count(1)
+            event_tasks: set[asyncio.Task[None]] = set()
 
             async def call(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-                """Отправляет команду CDP и дожидается ответа с тем же id."""
+                """Отправляет команду CDP и дожидается ответа с тем же id.
+
+                Ответ читает отдельная задача-читатель (см. _read_loop ниже) — call() лишь
+                кладёт future в pending и ждёт его. Поэтому вызов из обработчика события
+                (через _finalize_exchange) не блокирует чтение сокета и не приводит
+                к взаимоблокировке, из-за которой раньше не приходил ответ ни на один запрос.
+                """
                 cid = next(command_id)
                 future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
                 pending[cid] = future
@@ -298,36 +311,145 @@ async def _watch_target(
                 finally:
                     pending.pop(cid, None)
 
-            await call("Network.enable")
-            print(f"Подключено к цели CDP: {title}")
+            def _on_event_task_done(task: asyncio.Task[None]) -> None:
+                """Убирает завершённую задачу-обработчик события и логирует её падение.
 
-            async for msg in ws:
-                if msg.type != aiohttp.WSMsgType.TEXT:
-                    continue
+                Ошибка обработки одного события (например, сбой при чтении тела ответа)
+                не должна останавливать наблюдение за остальным трафиком этой цели.
+                """
+                event_tasks.discard(task)
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc is not None:
+                    print(
+                        f"Обработка события CDP цели {title} упала: "
+                        f"{type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+
+            async def _read_loop() -> None:
+                """Непрерывно читает сокет: ответы на команды резолвит сама, события — задачами.
+
+                Событие нельзя обрабатывать прямо в этом цикле через await: _handle_event
+                сам может вызвать call() и ждать ответа на новую команду, а этот ответ придёт
+                через тот же сокет. Если бы читатель был занят ожиданием обработчика, он не
+                смог бы прочитать этот ответ, и call() завис бы до CDP_CALL_TIMEOUT — именно
+                так раньше терялся и ответ на Network.enable, и тела ответов запросов.
+                """
+                async for msg in ws:
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        data = json.loads(msg.data)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if "id" in data:
+                        future = pending.get(data["id"])
+                        if future and not future.done():
+                            future.set_result(data.get("result") or {})
+                        continue
+
+                    if "method" in data:
+                        task = asyncio.create_task(
+                            _handle_event(data, requests, call, log_path, token)
+                        )
+                        event_tasks.add(task)
+                        task.add_done_callback(_on_event_task_done)
+
+            reader = asyncio.create_task(_read_loop())
+            try:
                 try:
-                    data = json.loads(msg.data)
-                except json.JSONDecodeError:
-                    continue
-
-                if "id" in data:
-                    future = pending.get(data["id"])
-                    if future and not future.done():
-                        future.set_result(data.get("result") or {})
-                    continue
-
-                await _handle_event(data, requests, call, log_path, token)
+                    await call("Network.enable")
+                except TimeoutError:
+                    # Обычные (dedicated) worker в этой сборке Chromium не отвечают на
+                    # Network.enable — домен Network им не поддерживается. Это ожидаемое
+                    # ограничение, а не сбой, поэтому без трейсбека и без остановки других целей.
+                    print(
+                        f"Цель {title} (тип: {target_type}) не поддерживает домен Network, "
+                        "пропускаем."
+                    )
+                    return
+                print(f"Подключено к цели CDP: {title} (тип: {target_type})")
+                await reader
+            finally:
+                # Читатель мог остановиться сам (обрыв соединения) или быть отменённым
+                # (Ctrl+C) — в обоих случаях висящие задачи обработки событий больше не
+                # получат ответ на свои команды, поэтому их нужно аккуратно отменить,
+                # а не бросить недожатыми.
+                reader.cancel()
+                for task in list(event_tasks):
+                    task.cancel()
+                await asyncio.gather(reader, *event_tasks, return_exceptions=True)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        print(f"Наблюдение за целью {title} остановлено из-за ошибки: {exc}", file=sys.stderr)
+        traceback.print_exc()
+        print(
+            f"Наблюдение за целью {title} остановлено из-за ошибки: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
 
 
-async def _list_page_targets(session: aiohttp.ClientSession) -> list[dict[str, Any]]:
-    """Запрашивает список целей отладки CDP и отбирает только страницы (renderer)."""
+async def _list_targets(session: aiohttp.ClientSession) -> list[dict[str, Any]]:
+    """Запрашивает список целей отладки CDP и отбирает все, к которым можно подключиться.
+
+    Раньше отбирался только type == "page", но на живом приложении Яндекс.Музыки
+    запросы к API вполне могут уходить из воркера (у запущенного клиента среди семи
+    целей — одна page, одна iframe и пять worker), а не только со страницы. Опытным
+    путём заранее не проверить, откуда придёт трафик, поэтому слушаем все цели с
+    непустым webSocketDebuggerUrl независимо от их типа.
+    """
     async with session.get(CDP_TARGETS_URL, timeout=aiohttp.ClientTimeout(total=5)) as response:
         response.raise_for_status()
         targets = await response.json(content_type=None)
-    return [t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+    return [t for t in targets if t.get("webSocketDebuggerUrl")]
+
+
+def _format_type_counts(targets: list[dict[str, Any]]) -> str:
+    """Формирует сводку по типам целей вида 'page: 1, iframe: 1, worker: 5' для вывода."""
+    counts = Counter(target.get("type", "?") for target in targets)
+    return ", ".join(f"{target_type}: {count}" for target_type, count in sorted(counts.items()))
+
+
+async def _poll_new_targets(
+    session: aiohttp.ClientSession,
+    known_ids: set[str],
+    watch_tasks: set[asyncio.Task[None]],
+    log_path: Path,
+    token: str | None,
+) -> None:
+    """Раз в CDP_POLL_INTERVAL секунд ищет цели, появившиеся после старта, и подключается к ним.
+
+    Приложение может создать новый worker уже во время наблюдения (например, в ответ
+    на действие пользователя) — без повторного опроса такая цель осталась бы
+    незамеченной до перезапуска скрипта. Уже наблюдаемые цели различаем по id и
+    повторно не подключаем. Работает, пока задачу не отменят (Ctrl+C).
+    """
+    while True:
+        await asyncio.sleep(CDP_POLL_INTERVAL)
+        try:
+            targets = await _list_targets(session)
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            # Приложение могло временно не ответить на /json — это не повод прекращать
+            # наблюдение за уже подключёнными целями, пробуем снова на следующем цикле.
+            print(
+                f"Повторный опрос целей CDP не удался: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+
+        for target in targets:
+            target_id = target.get("id")
+            if target_id is None or target_id in known_ids:
+                continue
+            known_ids.add(target_id)
+            title = target.get("title") or target_id
+            print(f"Подхвачена новая цель CDP: {title} (тип: {target.get('type', '?')})")
+            task = asyncio.create_task(_watch_target(session, target, log_path, token))
+            watch_tasks.add(task)
+            task.add_done_callback(watch_tasks.discard)
 
 
 def _ensure_log_dir(log_path: Path) -> None:
@@ -357,30 +479,41 @@ def _print_no_app_hint() -> None:
 
 
 async def _run(log_path: Path) -> int:
-    """Подключается ко всем renderer-целям приложения и наблюдает за трафиком до отмены."""
+    """Подключается ко всем целям приложения (включая воркеры) и наблюдает за трафиком до отмены."""
     token = _load_yandex_token()
     _ensure_log_dir(log_path)
     _print_intro(log_path)
 
     async with aiohttp.ClientSession() as session:
         try:
-            targets = await _list_page_targets(session)
+            targets = await _list_targets(session)
         except (aiohttp.ClientError, TimeoutError):
             _print_no_app_hint()
             return 1
 
         if not targets:
             print(
-                "Не найдено ни одной цели типа 'page' — похоже, окно приложения ещё не "
-                "открыто.",
+                "Не найдено ни одной цели с доступным WebSocket-адресом отладки — похоже, "
+                "окно приложения ещё не открыто.",
                 file=sys.stderr,
             )
             return 1
 
-        print(f"Найдено целей для наблюдения: {len(targets)}\n")
-        await asyncio.gather(
-            *(_watch_target(session, target, log_path, token) for target in targets)
+        print(f"Найдено целей для наблюдения: {len(targets)} ({_format_type_counts(targets)})\n")
+
+        known_ids: set[str] = {t["id"] for t in targets if t.get("id") is not None}
+        watch_tasks: set[asyncio.Task[None]] = set()
+        for target in targets:
+            task = asyncio.create_task(_watch_target(session, target, log_path, token))
+            watch_tasks.add(task)
+            task.add_done_callback(watch_tasks.discard)
+
+        # Повторный опрос /json — отдельная задача, живущая параллельно наблюдению за
+        # уже найденными целями, пока пользователь не остановит скрипт по Ctrl+C.
+        poll_task = asyncio.create_task(
+            _poll_new_targets(session, known_ids, watch_tasks, log_path, token)
         )
+        await asyncio.gather(poll_task, *watch_tasks)
     return 0
 
 
