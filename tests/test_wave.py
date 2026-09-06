@@ -134,8 +134,11 @@ class TestWaveSessionStart:
             f"получено {types}"
         )
 
-        # Проверяем что очередь пуста после flush
-        assert session.buffered == 0, "Очередь должна быть пуста после flush_pending_feedbacks()"
+        # Проверяем что очередь фидбеков пуста после flush (не буфер треков!)
+        assert len(session._pending_feedbacks) == 0, (
+            "Очередь фидбеков должна быть пуста после flush_pending_feedbacks(), "
+            f"получено {len(session._pending_feedbacks)} элементов"
+        )
 
 
 class TestWaveSessionNextTrack:

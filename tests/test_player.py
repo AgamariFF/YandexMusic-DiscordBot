@@ -173,7 +173,11 @@ class TestPlayerStartWave:
 
         Регрессионный тест: при перезапуске волны поверх играющего трека
         скип должен уйти на клиент по старой сессии, прежде чем она будет заменена.
+        Критично проверить ПОРЯДОК: досылка должна быть ПОСЛЕ прерывания трека
+        (иначе скип в очередь вообще не попадает) и ДО создания новой сессии.
         """
+        call_order = []
+
         client = AsyncMock()
         client.resolve_stream_url = AsyncMock(return_value="https://fake.url/track.mp3")
 
@@ -182,24 +186,51 @@ class TestPlayerStartWave:
         # Mock voice client
         voice_client = MagicMock()
         voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = True
         player._voice_client = voice_client
 
-        # Create and set up old session with pending feedbacks
+        # Create and set up old session that will accumulate feedbacks
         old_session = AsyncMock(spec=WaveSession)
-        old_session.flush_pending_feedbacks = AsyncMock()
+        async def track_skipped_side_effect(*args):
+            call_order.append("track_skipped")
+        old_session.track_skipped.side_effect = track_skipped_side_effect
+
+        async def flush_side_effect():
+            call_order.append("flush_pending_feedbacks")
+        old_session.flush_pending_feedbacks.side_effect = flush_side_effect
         player._session = old_session
+
+        # Set current track - this is critical: without it _interrupt_current_track_locked
+        # won't be called and skip won't be added to queue at all
+        current_track = make_track("old_track")
+        player._current_track = current_track
+        player._source = MagicMock()
+        player._source.elapsed = 15.0
+        player._state = PlayerState.PLAYING
 
         # Create new session that will replace old one
         new_session = AsyncMock(spec=WaveSession)
-        new_session.start = AsyncMock()
-        new_session.next_track = AsyncMock(return_value=make_track("1"))
+        async def new_session_init_side_effect():
+            call_order.append("new_session_created")
+        new_session.start = AsyncMock(side_effect=new_session_init_side_effect)
+        new_session.next_track = AsyncMock(return_value=make_track("new_track"))
 
         # Patch WaveSession constructor to return our new_session
         import unittest.mock as mock_module
         with mock_module.patch("bot.player.WaveSession", return_value=new_session):
             await player.start_wave()
 
-        # Verify that old session's flush_pending_feedbacks was called
+        # Verify call order: track_skipped → flush_pending_feedbacks → new_session_created
+        # This ensures the skip is in queue before we flush it, and we flush before new session
+        assert call_order == ["track_skipped", "flush_pending_feedbacks", "new_session_created"], (
+            f"Wrong call order: {call_order}. "
+            "Expected: track_skipped → flush_pending_feedbacks → new_session_created. "
+            "If flush happens before track_skipped, the skip will be lost!"
+        )
+
+        # Verify that old session's track_skipped was called (by _interrupt_current_track_locked)
+        old_session.track_skipped.assert_called_once()
+        # Verify that old session's flush_pending_feedbacks was called with accumulated feedbacks
         old_session.flush_pending_feedbacks.assert_called_once()
         # Verify that new session was set up
         new_session.start.assert_called_once()
