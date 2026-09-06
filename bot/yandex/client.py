@@ -113,6 +113,9 @@ class YandexMusicClient:
         (`UnauthorizedError`) тоже остаётся фатальным: иначе пользователь
         увидел бы «волна недоступна» и не узнал, что токен пора перевыпустить.
         """
+        # Вызов нужен ради проверки подключения: без него отсутствие клиента
+        # тихо проглотилось бы блоком `except Exception` ниже, который
+        # намеренно терпит любые неудачи фидбека, а не только отсутствие клиента.
         self._require_client()
         logger.info("Старт станции волны %s", self._station)
         try:
@@ -139,7 +142,7 @@ class YandexMusicClient:
             params: dict[str, Any] = {"settings2": "True"}
             if queue is not None:
                 params["queue"] = queue
-            raw_result = await client._request.get(url, params)
+            raw_result = await client.request.get(url, params)
             result = StationTracksResult.de_json(raw_result, client)
         except UnauthorizedError as exc:
             logger.error(
@@ -215,7 +218,7 @@ class YandexMusicClient:
         `application/x-www-form-urlencoded`, а сервер Яндекс.Музыки принимает
         только JSON и на форму отвечает `400 condition is not met` на любой
         тип фидбека. Поэтому запрос собирается здесь вручную, но выполняется
-        через приватный `_request` библиотечного клиента — он несёт
+        через публичный `request` библиотечного клиента — он несёт
         авторизацию и заголовки, менять нужно только тело и его кодирование.
         """
         client = self._require_client()
@@ -229,7 +232,7 @@ class YandexMusicClient:
         if from_ is not None:
             payload["from"] = from_
         logger.debug("Отправка фидбека rotor: type=%s track_id=%s", type_, track_id)
-        await client._request.post(url, params=params, json=payload)
+        await client.request.post(url, params=params, json=payload)
 
     async def notify_track_started(self, track_id: str, batch_id: str | None) -> None:
         """Сообщает API о начале воспроизведения трека."""

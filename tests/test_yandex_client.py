@@ -64,15 +64,15 @@ class TestYandexMusicClientFetchBatch:
         """fetch_wave_batch returning None → empty WaveBatch."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.get = AsyncMock(return_value=None)
+        mock_client.request = MagicMock()
+        mock_client.request.get = AsyncMock(return_value=None)
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
 
         with patch(
             "bot.yandex.client.StationTracksResult.de_json",
-            return_value=SimpleNamespace(sequence=[], batch_id=None),
+            return_value=None,
         ):
             batch = await client.fetch_wave_batch()
         assert batch.batch_id is None
@@ -83,8 +83,9 @@ class TestYandexMusicClientFetchBatch:
         """fetch_wave_batch with empty sequence → empty WaveBatch."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.get = AsyncMock(return_value={})
+        raw = {}
+        mock_client.request = MagicMock()
+        mock_client.request.get = AsyncMock(return_value=raw)
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
@@ -92,10 +93,11 @@ class TestYandexMusicClientFetchBatch:
         with patch(
             "bot.yandex.client.StationTracksResult.de_json",
             return_value=SimpleNamespace(sequence=[], batch_id="batch1"),
-        ):
+        ) as de_json_mock:
             batch = await client.fetch_wave_batch()
         assert batch.batch_id == "batch1"
         assert batch.tracks == ()
+        assert de_json_mock.call_args[0][0] is raw
 
     @pytest.mark.asyncio
     async def test_fetch_filters_unavailable_tracks(self):
@@ -135,8 +137,9 @@ class TestYandexMusicClientFetchBatch:
 
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.get = AsyncMock(return_value={})
+        raw = {}
+        mock_client.request = MagicMock()
+        mock_client.request.get = AsyncMock(return_value=raw)
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
@@ -144,7 +147,7 @@ class TestYandexMusicClientFetchBatch:
         with patch(
             "bot.yandex.client.StationTracksResult.de_json",
             return_value=result_tracks,
-        ):
+        ) as de_json_mock:
             batch = await client.fetch_wave_batch()
 
         assert len(batch.tracks) == 2
@@ -152,6 +155,7 @@ class TestYandexMusicClientFetchBatch:
         assert batch.tracks[0].title == "Song1"
         assert batch.tracks[0].duration == 180.0
         assert batch.tracks[1].id == "4"
+        assert de_json_mock.call_args[0][0] is raw
 
     @pytest.mark.asyncio
     async def test_fetch_artists_joined(self):
@@ -173,8 +177,8 @@ class TestYandexMusicClientFetchBatch:
 
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.get = AsyncMock(return_value={})
+        mock_client.request = MagicMock()
+        mock_client.request.get = AsyncMock(return_value={})
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
@@ -203,8 +207,8 @@ class TestYandexMusicClientFetchBatch:
 
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.get = AsyncMock(return_value={})
+        mock_client.request = MagicMock()
+        mock_client.request.get = AsyncMock(return_value={})
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
@@ -225,8 +229,8 @@ class TestYandexMusicClientNotify:
         """notify_track_started doesn't raise on error."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock(side_effect=Exception("Network error"))
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock(side_effect=Exception("Network error"))
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
@@ -239,8 +243,8 @@ class TestYandexMusicClientNotify:
         """notify_track_finished doesn't raise on error."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock(side_effect=Exception("Network error"))
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock(side_effect=Exception("Network error"))
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
@@ -253,8 +257,8 @@ class TestYandexMusicClientNotify:
         """notify_track_skipped doesn't raise on error."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock(side_effect=Exception("Network error"))
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock(side_effect=Exception("Network error"))
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
@@ -423,15 +427,15 @@ class TestYandexMusicClientStartWave:
         """Server rejects feedback with BadRequestError, but wave still starts.
 
         Regression test for a production bug: when the Yandex API rejects
-        rotor_station_feedback_radio_started with BadRequestError (condition
-        is not met), the wave is still playable, so start_wave() should NOT
-        raise an exception—only log a warning. Wave functionality must not
-        depend on optional feedback success.
+        feedback sent via request.post with BadRequestError (condition is not
+        met), the wave is still playable, so start_wave() should NOT raise an
+        exception—only log a warning. Wave functionality must not depend on
+        optional feedback success.
         """
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock(
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock(
             side_effect=yandex_music.exceptions.BadRequestError("condition is not met")
         )
 
@@ -450,8 +454,8 @@ class TestYandexMusicClientStartWave:
         """
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock(
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock(
             side_effect=yandex_music.exceptions.UnauthorizedError("token expired")
         )
 
@@ -466,8 +470,8 @@ class TestYandexMusicClientStartWave:
         """Network error in feedback does not stop wave startup."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock(
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock(
             side_effect=yandex_music.exceptions.NetworkError("Connection timeout")
         )
 
@@ -482,8 +486,8 @@ class TestYandexMusicClientStartWave:
         """Generic Exception in feedback does not stop wave startup."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock(side_effect=Exception("Some error"))
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock(side_effect=Exception("Some error"))
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
@@ -506,21 +510,21 @@ class TestYandexMusicClientStartWave:
 
     @pytest.mark.asyncio
     async def test_start_wave_success(self):
-        """Successful feedback: start_wave does not raise and calls _request.post."""
+        """Successful feedback: start_wave does not raise and calls request.post."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock()
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock()
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
 
         await client.start_wave()
 
-        # Verify _request.post was called exactly once
-        assert mock_client._request.post.call_count == 1
+        # Verify request.post was called exactly once
+        assert mock_client.request.post.call_count == 1
         # Check the URL contains the wave station ID
-        call_args = mock_client._request.post.call_args
+        call_args = mock_client.request.post.call_args
         url = call_args[0][0]
         assert url.endswith(f"/rotor/station/{WAVE_STATION_ID}/feedback")
         # Check json payload contains radioStarted type
@@ -528,19 +532,19 @@ class TestYandexMusicClientStartWave:
 
     @pytest.mark.asyncio
     async def test_start_wave_with_custom_params(self):
-        """start_wave passes from_ and batch_id to _request.post."""
+        """start_wave passes from_ and batch_id to request.post."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock()
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock()
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
 
         await client.start_wave(from_="custom_from", batch_id="custom_batch_id")
 
-        # Verify _request.post was called with correct parameters
-        call_args = mock_client._request.post.call_args
+        # Verify request.post was called with correct parameters
+        call_args = mock_client.request.post.call_args
         # Check json payload contains custom from and correct type
         assert call_args[1]["json"]["from"] == "custom_from"
         assert call_args[1]["json"]["type"] == "radioStarted"
@@ -561,16 +565,16 @@ class TestFeedbackRegression:
         """
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock()
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock()
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
 
         await client.notify_track_started("track1", "batch1")
 
-        # Verify _request.post was called with json argument, not data
-        call_args = mock_client._request.post.call_args
+        # Verify request.post was called with json argument, not data
+        call_args = mock_client.request.post.call_args
         assert "json" in call_args[1]
         assert "data" not in call_args[1]
 
@@ -579,65 +583,69 @@ class TestFeedbackRegression:
         """Each feedback type has correct required and optional fields."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock()
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock()
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
 
         # Test radioStarted: has 'from', no trackId
-        await client.start_wave(from_="test_from")
-        call_args = mock_client._request.post.call_args
+        await client.start_wave(from_="test_from", batch_id="batch0")
+        call_args = mock_client.request.post.call_args
         payload = call_args[1]["json"]
         assert payload["type"] == "radioStarted"
         assert "timestamp" in payload
         assert payload["from"] == "test_from"
         assert "trackId" not in payload
+        assert call_args[1]["params"]["batch-id"] == "batch0"
 
         # Test trackStarted: has trackId, no totalPlayedSeconds
-        mock_client._request.post.reset_mock()
+        mock_client.request.post.reset_mock()
         await client.notify_track_started("track1", "batch1")
-        call_args = mock_client._request.post.call_args
+        call_args = mock_client.request.post.call_args
         payload = call_args[1]["json"]
         assert payload["type"] == "trackStarted"
         assert "timestamp" in payload
         assert payload["trackId"] == "track1"
         assert "totalPlayedSeconds" not in payload
+        assert call_args[1]["params"]["batch-id"] == "batch1"
 
         # Test trackFinished: has trackId and totalPlayedSeconds
-        mock_client._request.post.reset_mock()
+        mock_client.request.post.reset_mock()
         await client.notify_track_finished("track1", 42.5, "batch1")
-        call_args = mock_client._request.post.call_args
+        call_args = mock_client.request.post.call_args
         payload = call_args[1]["json"]
         assert payload["type"] == "trackFinished"
         assert "timestamp" in payload
         assert payload["trackId"] == "track1"
         assert payload["totalPlayedSeconds"] == 42.5
+        assert call_args[1]["params"]["batch-id"] == "batch1"
 
         # Test skip: has trackId and totalPlayedSeconds
-        mock_client._request.post.reset_mock()
+        mock_client.request.post.reset_mock()
         await client.notify_track_skipped("track1", 10.0, "batch1")
-        call_args = mock_client._request.post.call_args
+        call_args = mock_client.request.post.call_args
         payload = call_args[1]["json"]
         assert payload["type"] == "skip"
         assert "timestamp" in payload
         assert payload["trackId"] == "track1"
         assert payload["totalPlayedSeconds"] == 10.0
+        assert call_args[1]["params"]["batch-id"] == "batch1"
 
     @pytest.mark.asyncio
     async def test_skip_reports_played_seconds(self):
         """skip feedback includes totalPlayedSeconds."""
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock()
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock()
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
 
         await client.notify_track_skipped("t1", 12.5, "b1")
 
-        call_args = mock_client._request.post.call_args
+        call_args = mock_client.request.post.call_args
         payload = call_args[1]["json"]
         assert payload["totalPlayedSeconds"] == 12.5
         assert payload["type"] == "skip"
@@ -652,8 +660,8 @@ class TestFeedbackRegression:
         """
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.get = AsyncMock(return_value={})
+        mock_client.request = MagicMock()
+        mock_client.request.get = AsyncMock(return_value={})
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
@@ -665,22 +673,22 @@ class TestFeedbackRegression:
         ):
             await client.fetch_wave_batch()
 
-        call_args = mock_client._request.get.call_args
-        # get is called positionally: await client._request.get(url, params)
+        call_args = mock_client.request.get.call_args
+        # get is called positionally: await client.request.get(url, params)
         params = call_args[0][1]
         assert params["settings2"] == "True"
         assert "queue" not in params
 
         # Test with queue
-        mock_client._request.get.reset_mock()
+        mock_client.request.get.reset_mock()
         with patch(
             "bot.yandex.client.StationTracksResult.de_json",
             return_value=SimpleNamespace(sequence=[], batch_id="batch2"),
         ):
             await client.fetch_wave_batch(queue="queue123")
 
-        call_args = mock_client._request.get.call_args
-        # get is called positionally: await client._request.get(url, params)
+        call_args = mock_client.request.get.call_args
+        # get is called positionally: await client.request.get(url, params)
         params = call_args[0][1]
         assert params["settings2"] == "True"
         assert params["queue"] == "queue123"
@@ -693,15 +701,15 @@ class TestFeedbackRegression:
         """
         mock_client = MagicMock()
         mock_client.base_url = "https://api.music.yandex.net"
-        mock_client._request = MagicMock()
-        mock_client._request.post = AsyncMock()
+        mock_client.request = MagicMock()
+        mock_client.request.post = AsyncMock()
 
         client = YandexMusicClient("token123")
         set_mock_client(client, mock_client)
 
         await client.notify_track_finished("t1", 0.0, "b1")
 
-        call_args = mock_client._request.post.call_args
+        call_args = mock_client.request.post.call_args
         payload = call_args[1]["json"]
         assert "totalPlayedSeconds" in payload
         assert payload["totalPlayedSeconds"] == 0.0
