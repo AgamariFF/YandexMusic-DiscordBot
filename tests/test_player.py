@@ -12,9 +12,18 @@ from bot.yandex.client import TrackInfo, WaveBatch
 from bot.yandex.wave import WaveSession
 
 
-def make_track(track_id, title="Song"):
+def make_track(track_id, title="Song", feedback_id=None):
     """Helper to create a TrackInfo."""
-    return TrackInfo(id=track_id, title=title, artists="Artist", duration=180.0, raw=None)
+    if feedback_id is None:
+        feedback_id = f"{track_id}:1"
+    return TrackInfo(
+        id=track_id,
+        feedback_id=feedback_id,
+        title=title,
+        artists="Artist",
+        duration=180.0,
+        raw=None,
+    )
 
 
 class FakeMusicClient:
@@ -280,7 +289,14 @@ class TestPlayerQueuePreview:
     def test_queue_preview_with_session(self, player):
         """queue_preview() delegates to session."""
         mock_session = MagicMock()
-        track1 = TrackInfo(id="1", title="Song1", artists="Artist", duration=180.0, raw=None)
+        track1 = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song1",
+            artists="Artist",
+            duration=180.0,
+            raw=None,
+        )
         mock_session.upcoming.return_value = [track1]
 
         player._session = mock_session
@@ -420,7 +436,7 @@ class TestPlaybackCallbackIdentity:
         # Set up player with a current track and source
         player._session = fake_session
         current_track = TrackInfo(
-            id="1", title="Current", artists="Artist", duration=100.0, raw=None
+            id="1", feedback_id="1:1", title="Current", artists="Artist", duration=100.0, raw=None
         )
         current_source = MagicMock()  # The actual current source
         current_source.elapsed = 50.0

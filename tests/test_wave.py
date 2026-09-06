@@ -48,9 +48,18 @@ class FakeMusicClient:
         self.calls.append(("send_feedbacks", feedbacks))
 
 
-def make_track(track_id, title="Song"):
+def make_track(track_id, title="Song", feedback_id=None):
     """Helper to create a TrackInfo."""
-    return TrackInfo(id=track_id, title=title, artists="Artist", duration=180.0, raw=None)
+    if feedback_id is None:
+        feedback_id = f"{track_id}:1"
+    return TrackInfo(
+        id=track_id,
+        feedback_id=feedback_id,
+        title=title,
+        artists="Artist",
+        duration=180.0,
+        raw=None,
+    )
 
 
 class TestWaveSessionBasics:
@@ -228,11 +237,11 @@ class TestWaveSessionNextTrack:
         await session.next_track()
 
         fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
-        # Первый fetch_calls[0] - это _refresh_chain после первого next_track() с queue=["1"]
+        # Первый fetch_calls[0] - это _refresh_chain после первого next_track() с queue=["1:1"]
         # Второй fetch_calls[1] - это заполнение буфера для второго next_track() с queue=[]
-        # Третий fetch_calls[2] - это _refresh_chain после второго next_track() с queue=["2"]
+        # Третий fetch_calls[2] - это _refresh_chain после второго next_track() с queue=["2:1"]
         assert len(fetch_calls) >= 2
-        assert fetch_calls[0][1] == ["1"]
+        assert fetch_calls[0][1] == ["1:1"]
 
     @pytest.mark.asyncio
     async def test_all_empty_batches_raise_error(self, monkeypatch):
@@ -624,12 +633,12 @@ class TestWaveSessionSkipAndAdaptation:
 
         fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
         assert len(fetch_calls) >= 3, f"Ожидается >=3 запросов, получено {len(fetch_calls)}"
-        # Проверяем, что queue параметры в правильном порядке
+        # Проверяем, что queue параметры в правильном порядке (используя feedback_id)
         assert fetch_calls[0][1] == []  # Начальное заполнение (queue пуст, т.к. no last_track)
-        assert fetch_calls[1][1] == ["a"]
-        assert fetch_calls[-1][1] == ["b"], (
-            f"Последний fetch должен иметь queue=['b'] "
-            f"(id трека из второго next_track()), получено queue={fetch_calls[-1][1]!r}"
+        assert fetch_calls[1][1] == ["a:1"]
+        assert fetch_calls[-1][1] == ["b:1"], (
+            f"Последний fetch должен иметь queue=['b:1'] "
+            f"(feedback_id трека из второго next_track()), получено queue={fetch_calls[-1][1]!r}"
         )
 
     @pytest.mark.asyncio

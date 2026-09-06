@@ -109,6 +109,7 @@ class TestYandexMusicClientFetchSessionTracks:
             artists=[SimpleNamespace(name="Artist1")],
             duration_ms=180000,
             available=True,
+            albums=[SimpleNamespace(id="101")],
         )
         track3 = SimpleNamespace(
             id="3",
@@ -116,6 +117,7 @@ class TestYandexMusicClientFetchSessionTracks:
             artists=[SimpleNamespace(name="Artist3A"), SimpleNamespace(name="Artist3B")],
             duration_ms=200000,
             available=False,
+            albums=[SimpleNamespace(id="103")],
         )
         track4 = SimpleNamespace(
             id="4",
@@ -123,6 +125,7 @@ class TestYandexMusicClientFetchSessionTracks:
             artists=[SimpleNamespace(name="Artist4")],
             duration_ms=240000,
             available=True,
+            albums=[SimpleNamespace(id="104")],
         )
 
         raw = {
@@ -166,6 +169,7 @@ class TestYandexMusicClientFetchSessionTracks:
             ],
             duration_ms=180000,
             available=True,
+            albums=[SimpleNamespace(id="101")],
         )
         raw = {
             "batchId": "batch1",
@@ -195,6 +199,7 @@ class TestYandexMusicClientFetchSessionTracks:
             artists=[],
             duration_ms=180000,
             available=True,
+            albums=[SimpleNamespace(id="101")],
         )
         raw = {
             "batchId": "batch1",
@@ -341,7 +346,14 @@ class TestYandexMusicClientResolveStream:
         client = YandexMusicClient("token123")
         client._client = MagicMock()  # Mock as connected
 
-        track = TrackInfo(id="1", title="Song", artists="Artist", duration=180.0, raw=track_raw)
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            raw=track_raw,
+        )
         await client.resolve_stream_url(track)
 
         assert info2.get_direct_link_async.called
@@ -363,7 +375,14 @@ class TestYandexMusicClientResolveStream:
         client = YandexMusicClient("token123")
         client._client = MagicMock()
 
-        track = TrackInfo(id="1", title="Song", artists="Artist", duration=180.0, raw=track_raw)
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            raw=track_raw,
+        )
         url = await client.resolve_stream_url(track)
 
         # The URL must come from get_direct_link_async, not from direct field
@@ -381,7 +400,14 @@ class TestYandexMusicClientResolveStream:
         client = YandexMusicClient("token123")
         client._client = MagicMock()
 
-        track = TrackInfo(id="1", title="Song", artists="Artist", duration=180.0, raw=track_raw)
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            raw=track_raw,
+        )
 
         with pytest.raises(TrackUnavailableError):
             await client.resolve_stream_url(track)
@@ -402,7 +428,14 @@ class TestYandexMusicClientResolveStream:
         client = YandexMusicClient("token123")
         client._client = MagicMock()
 
-        track = TrackInfo(id="1", title="Song", artists="Artist", duration=180.0, raw=track_raw)
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            raw=track_raw,
+        )
 
         with pytest.raises(TrackUnavailableError):
             await client.resolve_stream_url(track)
@@ -415,6 +448,7 @@ class TestTrackInfoDisplay:
         """display includes artist and title with duration."""
         track = TrackInfo(
             id="1",
+            feedback_id="1:1",
             title="Song Title",
             artists="Artist Name",
             duration=225.0,  # 3:45
@@ -429,6 +463,7 @@ class TestTrackInfoDisplay:
         """display without brackets when duration <= 0."""
         track = TrackInfo(
             id="1",
+            feedback_id="1:1",
             title="Song Title",
             artists="Artist Name",
             duration=0.0,
@@ -538,18 +573,29 @@ class TestBuildFeedback:
 
         assert "event" in feedback
         assert feedback["event"]["type"] == "radioStarted"
+        # Проверяем формат timestamp: ISO-8601 с суффиксом Z, без +00:00
         assert "timestamp" in feedback["event"]
+        ts = feedback["event"]["timestamp"]
+        assert ts.endswith("Z"), f"Timestamp должен заканчиваться на Z, получено {ts}"
+        assert "+00:00" not in ts, f"Timestamp не должен содержать +00:00, получено {ts}"
+        # Проверяем наличие from
         assert feedback["batchId"] == "batch1"
         assert feedback["from"] == "custom_from"
         assert "trackId" not in feedback["event"]
 
     def test_build_feedback_track_started(self):
-        """build_feedback для trackStarted имеет trackId."""
+        """build_feedback для trackStarted имеет trackId и from."""
         feedback = build_feedback("trackStarted", batch_id="batch1", track_id="track123")
 
         assert feedback["event"]["type"] == "trackStarted"
+        # trackId должен быть составным (feedback_id), не голым id
         assert feedback["event"]["trackId"] == "track123"
         assert feedback["batchId"] == "batch1"
+        # Проверяем что from всегда присутствует
+        assert "from" in feedback, "Поле 'from' должно быть в каждом фидбеке"
+        # Проверяем формат timestamp
+        ts = feedback["event"]["timestamp"]
+        assert ts.endswith("Z"), f"Timestamp должен заканчиваться на Z, получено {ts}"
         assert "totalPlayedSeconds" not in feedback["event"]
 
     def test_build_feedback_track_finished(self):
