@@ -13,6 +13,7 @@ _LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 _MIN_SECRET_LENGTH = 8
 _MASK = "***"
 _MAX_MESSAGE_LENGTH = 500
+_TRUNCATED_FLAG = "_message_truncated"
 _NOISY_LOGGER_NAMES = ("discord", "discord.gateway", "discord.voice_client", "yandex_music")
 
 
@@ -40,13 +41,20 @@ class SecretMaskingFilter(logging.Filter):
         секрет мог бы частично уцелеть в отброшенном хвосте. exc_text и
         stack_info не обрезаются — трейсбеки бывают длинными законно и нужны
         для диагностики целиком. Возвращает True.
+
+        Одна и та же запись проходит через фильтр несколько раз (он висит на
+        каждом хендлере и на root), поэтому обрезка идемпотентна — иначе
+        второй проход резал бы уже обрезанный текст и записывал в пометку
+        длину обрезка вместо исходной. Маскирование, наоборот, безусловно:
+        пропустить его нельзя даже один раз, иначе фильтр с другим набором
+        секретов, добавленный позже, выпустил бы секрет в лог.
         """
         try:
             message = record.getMessage()
         except Exception:
             message = str(record.msg)
 
-        record.msg = self._truncate(self._mask(message))
+        record.msg = self._truncate(record, self._mask(message))
         record.args = None
 
         if record.exc_info:
@@ -64,12 +72,20 @@ class SecretMaskingFilter(logging.Filter):
             text = text.replace(secret, _MASK)
         return text
 
-    def _truncate(self, text: str) -> str:
-        """Обрезает текст до `_MAX_MESSAGE_LENGTH` символов с пометкой об обрезке."""
+    @staticmethod
+    def _truncate(record: logging.LogRecord, text: str) -> str:
+        """Обрезает текст до `_MAX_MESSAGE_LENGTH` символов с пометкой об обрезке.
+
+        Признак обрезки хранится на самой записи, а не в фильтре: запись
+        разделяется всеми хендлерами, и повторный проход должен вернуть тот
+        же текст с той же исходной длиной в пометке.
+        """
+        if getattr(record, _TRUNCATED_FLAG, False):
+            return text
         if len(text) <= _MAX_MESSAGE_LENGTH:
             return text
-        original_length = len(text)
-        return f"{text[:_MAX_MESSAGE_LENGTH]}… [обрезано, всего {original_length} симв.]"
+        setattr(record, _TRUNCATED_FLAG, True)
+        return f"{text[:_MAX_MESSAGE_LENGTH]}… [обрезано, всего {len(text)} симв.]"
 
 
 def _console_stream() -> TextIO:

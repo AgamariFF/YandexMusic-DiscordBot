@@ -184,7 +184,9 @@ class TestSecretMaskingFilter:
         filter_obj.filter(record)
         assert "обрезано" in record.msg
         assert "600" in record.msg
-        assert len(record.msg) <= _MAX_MESSAGE_LENGTH + 30  # Allow for suffix
+        suffix = record.msg[_MAX_MESSAGE_LENGTH:]
+        assert record.msg[:_MAX_MESSAGE_LENGTH] == long_msg[:_MAX_MESSAGE_LENGTH]
+        assert len(suffix) < 60  # only the truncation notice follows the limit
 
     def test_message_exactly_at_limit_not_truncated(self):
         """Message with length exactly equal to limit is not truncated."""
@@ -226,6 +228,36 @@ class TestSecretMaskingFilter:
         assert secret not in record.msg
         # Check that masking occurred
         assert "***" in record.msg
+
+    def test_truncation_is_idempotent_across_handlers(self):
+        """Re-filtering a record keeps the original length in the notice.
+
+        The same filter instance is attached to every handler and to the root
+        logger, and handlers share one LogRecord, so a long record passes
+        through filter() two or three times. Without idempotence the second
+        pass would truncate the already truncated text and report the length
+        of the truncation instead of the original message.
+        """
+        filter_obj = SecretMaskingFilter([])
+        original_length = 4000
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="B" * original_length,
+            args=(),
+            exc_info=None,
+        )
+
+        filter_obj.filter(record)
+        after_first = record.msg
+
+        filter_obj.filter(record)
+        filter_obj.filter(record)
+
+        assert record.msg == after_first
+        assert str(original_length) in record.msg
 
     def test_traceback_not_truncated(self):
         """Traceback in exc_text is masked but not truncated."""
