@@ -402,3 +402,204 @@ def create_mock_interaction_with_member_in_voice():
 
     interaction.user = member
     return interaction
+
+
+class TestMusicCogHandlePauseToggle:
+    """Тесты для MusicCog.handle_pause_toggle."""
+
+    @pytest.fixture
+    def cog_with_player(self, mock_config, mock_client, mock_bot):
+        """MusicCog с реальным плеером."""
+        from bot.player import GuildPlayer, PlayerState
+
+        cog = MusicCog(mock_bot, mock_config, mock_client)
+        cog._player = MagicMock(spec=GuildPlayer)
+        cog._player.current = None
+        cog._player.state = PlayerState.IDLE
+        cog._player.resume = MagicMock()
+        cog._player.pause = MagicMock()
+        cog._update_player_message = AsyncMock()
+        return cog
+
+    @pytest.mark.asyncio
+    async def test_handle_pause_toggle_resumes_when_paused(self, cog_with_player):
+        """handle_pause_toggle вызывает resume() при PAUSED."""
+        from bot.player import PlayerState
+
+        cog_with_player._player.state = PlayerState.PAUSED
+
+        interaction = create_mock_interaction()
+        await cog_with_player.handle_pause_toggle(interaction)
+
+        cog_with_player._player.resume.assert_called_once()
+        cog_with_player._player.pause.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_pause_toggle_pauses_when_playing(self, cog_with_player):
+        """handle_pause_toggle вызывает pause() при PLAYING."""
+        from bot.player import PlayerState
+
+        cog_with_player._player.state = PlayerState.PLAYING
+
+        interaction = create_mock_interaction()
+        await cog_with_player.handle_pause_toggle(interaction)
+
+        cog_with_player._player.pause.assert_called_once()
+        cog_with_player._player.resume.assert_not_called()
+
+
+class TestMusicCogHandleSkip:
+    """Тесты для MusicCog.handle_skip."""
+
+    @pytest.fixture
+    def cog_with_player(self, mock_config, mock_client, mock_bot):
+        """MusicCog с реальным плеером."""
+        from bot.player import GuildPlayer
+
+        cog = MusicCog(mock_bot, mock_config, mock_client)
+        cog._player = MagicMock(spec=GuildPlayer)
+        cog._player.skip = AsyncMock()
+        cog._update_player_message = AsyncMock()
+        return cog
+
+    @pytest.mark.asyncio
+    async def test_handle_skip_defers_before_skip(self, cog_with_player):
+        """handle_skip вызывает defer() перед skip()."""
+        call_order = []
+
+        async def mock_defer(*args, **kwargs):
+            call_order.append("defer")
+
+        async def mock_skip(*args, **kwargs):
+            call_order.append("skip")
+
+        cog_with_player._player.skip = mock_skip
+
+        interaction = create_mock_interaction()
+        interaction.response.defer = mock_defer
+
+        await cog_with_player.handle_skip(interaction)
+
+        assert "defer" in call_order
+        assert "skip" in call_order
+        assert call_order.index("defer") < call_order.index("skip")
+
+
+class TestMusicCogHandleDisconnect:
+    """Тесты для MusicCog.handle_disconnect."""
+
+    @pytest.fixture
+    def cog_with_player(self, mock_config, mock_client, mock_bot):
+        """MusicCog с реальным плеером."""
+        from bot.player import GuildPlayer
+
+        cog = MusicCog(mock_bot, mock_config, mock_client)
+        cog._player = MagicMock(spec=GuildPlayer)
+        cog._player.disconnect = AsyncMock()
+        cog._update_player_message = AsyncMock()
+        return cog
+
+    @pytest.mark.asyncio
+    async def test_handle_disconnect_defers_before_disconnect(self, cog_with_player):
+        """handle_disconnect вызывает defer() перед disconnect()."""
+        call_order = []
+
+        async def mock_defer(*args, **kwargs):
+            call_order.append("defer")
+
+        async def mock_disconnect(*args, **kwargs):
+            call_order.append("disconnect")
+
+        cog_with_player._player.disconnect = mock_disconnect
+
+        interaction = create_mock_interaction()
+        interaction.response.defer = mock_defer
+
+        await cog_with_player.handle_disconnect(interaction)
+
+        assert "defer" in call_order
+        assert "disconnect" in call_order
+        assert call_order.index("defer") < call_order.index("disconnect")
+
+
+class TestMusicCogHandleSearchQuery:
+    """Тесты для MusicCog.handle_search_query."""
+
+    @pytest.fixture
+    def cog_with_player(self, mock_config, mock_client, mock_bot):
+        """MusicCog с реальным плеером."""
+        cog = MusicCog(mock_bot, mock_config, mock_client)
+        cog._search_and_start = AsyncMock()
+        return cog
+
+    @pytest.mark.asyncio
+    async def test_handle_search_query_transmits_exact_query(self, cog_with_player):
+        """handle_search_query передаёт query без изменений в _search_and_start."""
+        query_received = None
+
+        async def capture_query(interaction, received_query):
+            nonlocal query_received
+            query_received = received_query
+
+        cog_with_player._search_and_start = capture_query
+
+        interaction = create_mock_interaction()
+        test_query = 'The Beatles - "Hey Jude"'
+
+        await cog_with_player.handle_search_query(interaction, test_query)
+
+        assert query_received == test_query
+
+
+class TestMusicCogUpdatePlayerMessageRepositioning:
+    """Тесты для _update_player_message с reposition параметром."""
+
+    @pytest.fixture
+    def cog_with_player(self, mock_config, mock_client, mock_bot):
+        """MusicCog с реальным плеером."""
+        from bot.player import GuildPlayer
+
+        cog = MusicCog(mock_bot, mock_config, mock_client)
+        cog._player = MagicMock(spec=GuildPlayer)
+        cog._player.current = None
+        cog._player.state = MagicMock()
+        cog._replace_player_view = MagicMock()
+        cog._delete_player_message = AsyncMock()
+        return cog
+
+    @pytest.mark.asyncio
+    async def test_update_player_message_reposition_true_deletes_old_when_not_last(
+        self, cog_with_player
+    ):
+        """_update_player_message с reposition=True удаляет старое сообщение при не-last."""
+        # Старое сообщение существует
+        old_message = MagicMock(spec=discord.Message)
+        cog_with_player._player_message = old_message
+
+        # Сообщение не последнее в канале
+        cog_with_player._player_message_is_last = MagicMock(return_value=False)
+
+        # Взаимодействие None (вызов из _announce, не из кнопки)
+        await cog_with_player._update_player_message(interaction=None, reposition=True)
+
+        # Проверяем, что _delete_player_message была вызвана
+        cog_with_player._delete_player_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_player_message_reposition_false_does_not_delete(self, cog_with_player):
+        """_update_player_message с reposition=False не удаляет сообщение."""
+        # Старое сообщение существует и редактируется
+        old_message = MagicMock(spec=discord.Message)
+        old_message.edit = AsyncMock()
+        cog_with_player._player_message = old_message
+
+        # Сообщение не последнее в канале
+        cog_with_player._player_message_is_last = MagicMock(return_value=False)
+
+        # Взаимодействие None
+        await cog_with_player._update_player_message(interaction=None, reposition=False)
+
+        # _delete_player_message не должна быть вызвана
+        cog_with_player._delete_player_message.assert_not_called()
+        # Но старое сообщение должно быть отредактировано
+        old_message.edit.assert_called_once()

@@ -297,3 +297,236 @@ class TestPlayerView:
 
         result = await view.interaction_check(interaction)
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_handle_pause_toggle_resumes_when_paused(self, mock_player, mock_controller):
+        """handle_pause_toggle вызывает resume() при состоянии PAUSED."""
+        from bot.cogs.player_view import PlayerView as RealPlayerView
+
+        mock_player.state = PlayerState.PAUSED
+        mock_player.resume = MagicMock()
+        mock_player.pause = MagicMock()
+
+        view = RealPlayerView(player=mock_player, controller=mock_controller)
+        view._update_player_message = AsyncMock()
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.is_done = MagicMock(return_value=False)
+
+        # Вызываем handle_pause_toggle через контроллер
+        async def mock_handle_pause_toggle(interaction):
+            if mock_player.state is PlayerState.PAUSED:
+                mock_player.resume()
+            else:
+                mock_player.pause()
+            await view._update_player_message(interaction)
+
+        mock_controller.handle_pause_toggle = mock_handle_pause_toggle
+
+        await view.handle_pause_toggle(interaction)
+        mock_player.resume.assert_called_once()
+        mock_player.pause.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_pause_toggle_pauses_when_playing(self, mock_player, mock_controller):
+        """handle_pause_toggle вызывает pause() при состоянии PLAYING."""
+        from bot.cogs.player_view import PlayerView as RealPlayerView
+
+        mock_player.state = PlayerState.PLAYING
+        mock_player.resume = MagicMock()
+        mock_player.pause = MagicMock()
+
+        view = RealPlayerView(player=mock_player, controller=mock_controller)
+        view._update_player_message = AsyncMock()
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.is_done = MagicMock(return_value=False)
+
+        # Вызываем handle_pause_toggle через контроллер
+        async def mock_handle_pause_toggle(interaction):
+            if mock_player.state is PlayerState.PAUSED:
+                mock_player.resume()
+            else:
+                mock_player.pause()
+            await view._update_player_message(interaction)
+
+        mock_controller.handle_pause_toggle = mock_handle_pause_toggle
+
+        await view.handle_pause_toggle(interaction)
+        mock_player.pause.assert_called_once()
+        mock_player.resume.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_skip_defers_before_skip(self, mock_player, mock_controller):
+        """handle_skip вызывает defer() перед skip()."""
+        from bot.cogs.player_view import PlayerView as RealPlayerView
+
+        call_order = []
+
+        async def mock_defer(*args, **kwargs):
+            call_order.append("defer")
+
+        async def mock_skip(*args, **kwargs):
+            call_order.append("skip")
+
+        mock_player.skip = mock_skip
+
+        view = RealPlayerView(player=mock_player, controller=mock_controller)
+        view._update_player_message = AsyncMock()
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.defer = mock_defer
+        interaction.response.is_done = MagicMock(return_value=True)
+
+        # Вызываем handle_skip через контроллер
+        async def mock_handle_skip(interaction):
+            await interaction.response.defer()
+            call_order.append("skip-called")
+            await mock_player.skip()
+
+        mock_controller.handle_skip = mock_handle_skip
+
+        await view.handle_skip(interaction)
+
+        # Проверяем порядок: defer должна быть перед skip
+        assert "defer" in call_order
+        assert "skip-called" in call_order
+        assert call_order.index("defer") < call_order.index("skip-called")
+
+    @pytest.mark.asyncio
+    async def test_handle_disconnect_defers_before_disconnect(self, mock_player, mock_controller):
+        """handle_disconnect вызывает defer() перед disconnect()."""
+        from bot.cogs.player_view import PlayerView as RealPlayerView
+
+        call_order = []
+
+        async def mock_defer(*args, **kwargs):
+            call_order.append("defer")
+
+        async def mock_disconnect(*args, **kwargs):
+            call_order.append("disconnect")
+
+        mock_player.disconnect = mock_disconnect
+
+        view = RealPlayerView(player=mock_player, controller=mock_controller)
+        view._update_player_message = AsyncMock()
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.defer = mock_defer
+        interaction.response.is_done = MagicMock(return_value=True)
+
+        # Вызываем handle_disconnect через контроллер
+        async def mock_handle_disconnect(interaction):
+            await interaction.response.defer()
+            call_order.append("disconnect-called")
+            await mock_player.disconnect()
+
+        mock_controller.handle_disconnect = mock_handle_disconnect
+
+        await view.handle_disconnect(interaction)
+
+        # Проверяем порядок: defer должна быть перед disconnect
+        assert "defer" in call_order
+        assert "disconnect-called" in call_order
+        assert call_order.index("defer") < call_order.index("disconnect-called")
+
+    @pytest.mark.asyncio
+    async def test_run_handles_bot_error_with_user_message(self, mock_player, mock_controller):
+        """_run обрабатывает BotError и отправляет user_message пользователю."""
+        from bot.cogs.player_view import PlayerView as RealPlayerView
+        from bot.errors import BotError
+
+        view = RealPlayerView(player=mock_player, controller=mock_controller)
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.is_done = MagicMock(return_value=False)
+
+        error = BotError(user_message="Трек не найден")
+        action = AsyncMock(side_effect=error)
+
+        await view._run(interaction, action)
+
+        # Проверяем, что response.send_message был вызван с user_message
+        interaction.response.send_message.assert_called_once()
+        call_args = interaction.response.send_message.call_args
+        assert call_args[0][0] == "Трек не найден"
+        assert call_args[1]["ephemeral"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_handles_generic_exception_with_neutral_message(
+        self, mock_player, mock_controller
+    ):
+        """_run обрабатывает исключения и не утекает их содержимое пользователю."""
+        from bot.cogs.player_view import PlayerView as RealPlayerView
+
+        view = RealPlayerView(player=mock_player, controller=mock_controller)
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.is_done = MagicMock(return_value=False)
+
+        action = AsyncMock(side_effect=ValueError("Some internal error"))
+
+        await view._run(interaction, action)
+
+        # Проверяем, что отправлено нейтральное сообщение, а не содержимое исключения
+        interaction.response.send_message.assert_called_once()
+        call_args = interaction.response.send_message.call_args
+        message = call_args[0][0]
+        assert "Внутренняя ошибка" in message
+        assert "Some internal error" not in message
+
+
+class TestSearchModal:
+    """Тесты для SearchModal."""
+
+    @pytest.mark.asyncio
+    async def test_search_modal_on_submit_passes_query_correctly(self):
+        """SearchModal.on_submit передаёт запрос контроллеру без изменений."""
+        from bot.cogs.player_view import SearchModal
+
+        mock_controller = AsyncMock(spec=PlayerController)
+        modal = SearchModal(controller=mock_controller)
+
+        # Создаём TextInput с заданным значением
+        text_input = MagicMock()
+        text_input.value = "The Beatles - Hey Jude"
+        modal.query_label.component = text_input
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.is_done = MagicMock(return_value=False)
+
+        await modal.on_submit(interaction)
+
+        # Проверяем, что handle_search_query вызвана с точным текстом
+        mock_controller.handle_search_query.assert_called_once()
+        call_args = mock_controller.handle_search_query.call_args
+        assert call_args[0][1] == "The Beatles - Hey Jude"
+
+    @pytest.mark.asyncio
+    async def test_search_modal_preserves_special_characters(self):
+        """SearchModal.on_submit сохраняет спецсимволы в запросе."""
+        from bot.cogs.player_view import SearchModal
+
+        mock_controller = AsyncMock(spec=PlayerController)
+        modal = SearchModal(controller=mock_controller)
+
+        text_input = MagicMock()
+        text_input.value = 'Artist "Name" - Song (remix)'
+        modal.query_label.component = text_input
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.is_done = MagicMock(return_value=False)
+
+        await modal.on_submit(interaction)
+
+        mock_controller.handle_search_query.assert_called_once()
+        call_args = mock_controller.handle_search_query.call_args
+        assert call_args[0][1] == 'Artist "Name" - Song (remix)'
