@@ -113,6 +113,7 @@ class TestTrackSearchViewInteractionCheck:
             title="Song",
             artists="Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
         on_select = AsyncMock()
@@ -134,6 +135,7 @@ class TestTrackSearchViewInteractionCheck:
             title="Song",
             artists="Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
         on_select = AsyncMock()
@@ -165,6 +167,7 @@ class TestTrackSearchViewSelection:
             title="Song",
             artists="Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
         on_select = AsyncMock()
@@ -193,6 +196,7 @@ class TestTrackButtonLabels:
                 title="Song 1",
                 artists="Artist 1",
                 duration=180.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
             TrackInfo(
@@ -201,6 +205,7 @@ class TestTrackButtonLabels:
                 title="Song 2",
                 artists="Artist 2",
                 duration=200.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
             TrackInfo(
@@ -209,6 +214,7 @@ class TestTrackButtonLabels:
                 title="Song 3",
                 artists="Artist 3",
                 duration=220.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
         )
@@ -232,6 +238,7 @@ class TestTrackButtonLabels:
                 title="Song 1",
                 artists="Artist 1",
                 duration=180.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
             TrackInfo(
@@ -240,6 +247,7 @@ class TestTrackButtonLabels:
                 title="Song 2",
                 artists="Artist 2",
                 duration=200.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
         )
@@ -287,6 +295,7 @@ class TestSearchEmbedBuild:
                 title="Song 1",
                 artists="Artist 1",
                 duration=180.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
             TrackInfo(
@@ -295,6 +304,7 @@ class TestSearchEmbedBuild:
                 title="Song 2",
                 artists="Artist 2",
                 duration=200.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
         )
@@ -318,6 +328,7 @@ class TestSearchEmbedBuild:
                 title="Song",
                 artists="Artist",
                 duration=180.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
         )
@@ -346,6 +357,7 @@ class TestSearchEmbedBuild:
                 title="Song 1",
                 artists="Artist 1",
                 duration=180.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
             TrackInfo(
@@ -354,6 +366,7 @@ class TestSearchEmbedBuild:
                 title="Song 2",
                 artists="Artist 2",
                 duration=200.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
             TrackInfo(
@@ -362,6 +375,7 @@ class TestSearchEmbedBuild:
                 title="Song 3",
                 artists="Artist 3",
                 duration=220.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
         )
@@ -408,6 +422,7 @@ class TestTrackSearchViewTimeout:
                 title="Song 1",
                 artists="Artist",
                 duration=180.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
             TrackInfo(
@@ -416,6 +431,7 @@ class TestTrackSearchViewTimeout:
                 title="Song 2",
                 artists="Artist",
                 duration=180.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
         )
@@ -450,6 +466,7 @@ class TestSearchCommandBranching:
             title="Only Song",
             artists="Solo Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
 
@@ -480,6 +497,7 @@ class TestSearchCommandBranching:
                 title="Song 1",
                 artists="Artist 1",
                 duration=180.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
             TrackInfo(
@@ -488,6 +506,7 @@ class TestSearchCommandBranching:
                 title="Song 2",
                 artists="Artist 2",
                 duration=200.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
             TrackInfo(
@@ -496,6 +515,7 @@ class TestSearchCommandBranching:
                 title="Song 3",
                 artists="Artist 3",
                 duration=220.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
         )
@@ -542,8 +562,10 @@ class TestMusicCogWaveDescription:
     """Тесты для отображения описания волны в embed'ах."""
 
     @pytest.mark.asyncio
-    async def test_announce_includes_wave_description_field(self, cog_with_search):
-        """Анонс нового трека отправляет embed с полем "Волна"."""
+    async def test_announce_updates_player_message(self, cog_with_search):
+        """_announce обновляет сообщение-плеер при новом треке."""
+        from unittest.mock import patch
+
         cog, mock_client, mock_player = cog_with_search
 
         track = TrackInfo(
@@ -552,38 +574,25 @@ class TestMusicCogWaveDescription:
             title="Test Song",
             artists="Test Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
 
-        # Мокируем канал анонса
-        mock_channel = AsyncMock()
-        cog._announce_channel = mock_channel
+        # Мокируем _update_player_message
+        with patch.object(cog, '_update_player_message', new_callable=AsyncMock) as mock_update:
+            # Вызываем _announce с описанием волны
+            wave_desc = "Моя волна по Test Artist — Test Song"
+            mock_player.wave_description = wave_desc
+            await cog._announce(track, wave_desc)
 
-        # Вызываем _announce с конкретным описанием волны
-        wave_desc = "Моя волна по Test Artist — Test Song"
-        await cog._announce(track, wave_desc)
-
-        # Проверяем что было отправлено сообщение
-        mock_channel.send.assert_called_once()
-        call_args = mock_channel.send.call_args
-        embed = call_args[1]["embed"]
-
-        # Проверяем что embed содержит поле "Волна" с правильным значением
-        assert embed is not None
-        wave_field = None
-        for field in embed.fields:
-            if field.name == "Волна":
-                wave_field = field
-                break
-
-        assert wave_field is not None, "Поле 'Волна' должно присутствовать в embed"
-        assert wave_field.value == wave_desc, (
-            f"Значение 'Волна' должно быть '{wave_desc}', получено {wave_field.value}"
-        )
+        # Проверяем что _update_player_message был вызван
+        mock_update.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_announce_wave_description_none_shows_fallback(self, cog_with_search):
-        """При wave_description=None показывается запасное значение '—'."""
+    async def test_announce_wave_description_none_updates_message(self, cog_with_search):
+        """_announce обновляет плеер даже при wave_description=None."""
+        from unittest.mock import patch
+
         cog, mock_client, mock_player = cog_with_search
 
         track = TrackInfo(
@@ -592,33 +601,23 @@ class TestMusicCogWaveDescription:
             title="Test Song",
             artists="Test Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
 
-        mock_channel = AsyncMock()
-        cog._announce_channel = mock_channel
+        # Мокируем _update_player_message
+        with patch.object(cog, '_update_player_message', new_callable=AsyncMock) as mock_update:
+            mock_player.wave_description = None
+            await cog._announce(track, None)
 
-        # Вызываем с wave_description=None
-        await cog._announce(track, None)
-
-        mock_channel.send.assert_called_once()
-        call_args = mock_channel.send.call_args
-        embed = call_args[1]["embed"]
-
-        wave_field = None
-        for field in embed.fields:
-            if field.name == "Волна":
-                wave_field = field
-                break
-
-        assert wave_field is not None
-        assert wave_field.value == "—", (
-            f"При None wave_description должен быть '—', получено {wave_field.value}"
-        )
+        # Проверяем что _update_player_message был вызван
+        mock_update.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_send_wave_started_includes_wave_description(self, cog_with_search):
-        """_send_wave_started берёт wave_description и помещает в embed."""
+    async def test_build_player_embed_includes_wave_description(self, cog_with_search):
+        """build_player_embed включает описание волны в заголовок."""
+        from bot.cogs.music import build_player_embed
+
         cog, mock_client, mock_player = cog_with_search
 
         track = TrackInfo(
@@ -627,31 +626,22 @@ class TestMusicCogWaveDescription:
             title="Started Track",
             artists="Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
 
         # Устанавливаем wave_description в плеере
         wave_desc = "Моя волна по Artist — Track"
         mock_player.wave_description = wave_desc
+        mock_player.current = track
+        mock_player.state = 1  # PLAYING
+        mock_player.now_playing = MagicMock(return_value=MagicMock(elapsed=50.0))
 
-        interaction = create_mock_interaction_with_member_in_voice()
+        # Собираем embed
+        embed = build_player_embed(mock_player, discord.Color.gold())
 
-        await cog._send_wave_started(interaction, track)
-
-        interaction.followup.send.assert_called_once()
-        call_args = interaction.followup.send.call_args
-        embed = call_args[1]["embed"]
-
-        wave_field = None
-        for field in embed.fields:
-            if field.name == "Волна":
-                wave_field = field
-                break
-
-        assert wave_field is not None, "Поле 'Волна' должно присутствовать в embed"
-        assert wave_field.value == wave_desc, (
-            f"Значение 'Волна' должно быть '{wave_desc}', получено {wave_field.value}"
-        )
+        # Описание волны должно быть в заголовке
+        assert embed.title == wave_desc
 
     @pytest.mark.asyncio
     async def test_nowplaying_includes_wave_description(self, cog_with_search):
@@ -664,6 +654,7 @@ class TestMusicCogWaveDescription:
             title="Now Playing",
             artists="Current Artist",
             duration=240.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
 
@@ -750,6 +741,7 @@ class TestAllowedMentionsProtection:
                 title="Song 1",
                 artists="Artist 1",
                 duration=180.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
             TrackInfo(
@@ -758,6 +750,7 @@ class TestAllowedMentionsProtection:
                 title="Song 2",
                 artists="Artist 2",
                 duration=200.0,
+            cover_url="https://example.com/cover.jpg",
                 raw=None,
             ),
         )
@@ -793,6 +786,7 @@ class TestAllowedMentionsProtection:
             title="Selected Song",
             artists="Selected Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
         on_select = AsyncMock()

@@ -33,6 +33,56 @@ def set_mock_client(client_instance, mock_client):
     client_instance._client = mock_client
 
 
+def create_mock_track(
+    track_id,
+    title,
+    artists,
+    duration_ms=180000,
+    available=True,
+    album_id=None,
+    cover_uri=None,
+    og_image=None,
+):
+    """Создаёт мок трека с необходимыми полями для cover_url.
+
+    Возвращает объект SimpleNamespace с полями cover_uri, og_image и методами
+    get_cover_url, get_og_image_url.
+    """
+    # Создаём методы для получения обложки
+    def get_cover_url(size):
+        if cover_uri:
+            return f"{cover_uri.replace('%%', size)}"
+        return None
+
+    def get_og_image_url(size):
+        if og_image:
+            return f"{og_image.replace('%%', size)}"
+        return None
+
+    # Если artists - строка, оборачиваем в список
+    if isinstance(artists, str):
+        artist_objects = [SimpleNamespace(name=artists)]
+    else:
+        artist_objects = artists
+
+    track = SimpleNamespace(
+        id=track_id,
+        title=title,
+        artists=artist_objects,
+        duration_ms=duration_ms,
+        available=available,
+        albums=[SimpleNamespace(id=album_id)] if album_id else [],
+        cover_uri=cover_uri,
+        og_image=og_image,
+    )
+
+    # Добавляем методы
+    track.get_cover_url = get_cover_url
+    track.get_og_image_url = get_og_image_url
+
+    return track
+
+
 class TestYandexMusicClientBasics:
     """Basic YandexMusicClient tests."""
 
@@ -109,30 +159,16 @@ class TestYandexMusicClientFetchSessionTracks:
     @pytest.mark.asyncio
     async def test_fetch_filters_unavailable_tracks(self):
         """fetch_session_tracks фильтрует недоступные и элементы без track."""
-        track1 = SimpleNamespace(
-            id="1",
-            title="Song1",
-            artists=[SimpleNamespace(name="Artist1")],
-            duration_ms=180000,
-            available=True,
-            albums=[SimpleNamespace(id="101")],
+        track1 = create_mock_track("1", "Song1", "Artist1", 180000, True, "101")
+        track3 = create_mock_track(
+            "3",
+            "Song3",
+            [SimpleNamespace(name="Artist3A"), SimpleNamespace(name="Artist3B")],
+            200000,
+            False,
+            "103",
         )
-        track3 = SimpleNamespace(
-            id="3",
-            title="Song3",
-            artists=[SimpleNamespace(name="Artist3A"), SimpleNamespace(name="Artist3B")],
-            duration_ms=200000,
-            available=False,
-            albums=[SimpleNamespace(id="103")],
-        )
-        track4 = SimpleNamespace(
-            id="4",
-            title="Song4",
-            artists=[SimpleNamespace(name="Artist4")],
-            duration_ms=240000,
-            available=True,
-            albums=[SimpleNamespace(id="104")],
-        )
+        track4 = create_mock_track("4", "Song4", "Artist4", 240000, True, "104")
 
         raw = {
             "batchId": "batch1",
@@ -166,16 +202,13 @@ class TestYandexMusicClientFetchSessionTracks:
     @pytest.mark.asyncio
     async def test_fetch_artists_joined(self):
         """Артисты объединяются с ', '."""
-        track = SimpleNamespace(
-            id="1",
-            title="Song",
-            artists=[
-                SimpleNamespace(name="Artist1"),
-                SimpleNamespace(name="Artist2"),
-            ],
-            duration_ms=180000,
-            available=True,
-            albums=[SimpleNamespace(id="101")],
+        track = create_mock_track(
+            "1",
+            "Song",
+            [SimpleNamespace(name="Artist1"), SimpleNamespace(name="Artist2")],
+            180000,
+            True,
+            "101",
         )
         raw = {
             "batchId": "batch1",
@@ -199,14 +232,7 @@ class TestYandexMusicClientFetchSessionTracks:
     @pytest.mark.asyncio
     async def test_fetch_empty_artists_fallback(self):
         """Пустой список артистов → запасная строка."""
-        track = SimpleNamespace(
-            id="1",
-            title="Song",
-            artists=[],
-            duration_ms=180000,
-            available=True,
-            albums=[SimpleNamespace(id="101")],
-        )
+        track = create_mock_track("1", "Song", [], 180000, True, "101")
         raw = {
             "batchId": "batch1",
             "sequence": [{"track": track}],
@@ -358,6 +384,7 @@ class TestYandexMusicClientResolveStream:
             title="Song",
             artists="Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=track_raw,
         )
         await client.resolve_stream_url(track)
@@ -387,6 +414,7 @@ class TestYandexMusicClientResolveStream:
             title="Song",
             artists="Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=track_raw,
         )
         url = await client.resolve_stream_url(track)
@@ -412,6 +440,7 @@ class TestYandexMusicClientResolveStream:
             title="Song",
             artists="Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=track_raw,
         )
 
@@ -440,6 +469,7 @@ class TestYandexMusicClientResolveStream:
             title="Song",
             artists="Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=track_raw,
         )
 
@@ -458,6 +488,7 @@ class TestTrackInfoDisplay:
             title="Song Title",
             artists="Artist Name",
             duration=225.0,  # 3:45
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
         display = track.display
@@ -473,6 +504,7 @@ class TestTrackInfoDisplay:
             title="Song Title",
             artists="Artist Name",
             duration=0.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
         display = track.display
@@ -852,15 +884,8 @@ class TestFeedbackIdWithoutAlbum:
     @pytest.mark.asyncio
     async def test_feedback_id_fallback_without_album(self):
         """Трек без альбомов использует str(track_id) как feedback_id."""
-        # Трек без поля albums (или с пустым списком)
-        track_no_album = SimpleNamespace(
-            id="777",
-            title="No Album Track",
-            artists=[SimpleNamespace(name="Artist")],
-            duration_ms=180000,
-            available=True,
-            albums=[],  # Пустой список альбомов
-        )
+        # Трек без альбомов
+        track_no_album = create_mock_track("777", "No Album Track", "Artist", 180000, True, None)
 
         raw = {
             "batchId": "batch1",
@@ -895,14 +920,7 @@ class TestFeedbackIdWithoutAlbum:
         При мутации album_id = None тест должен упасть.
         """
         # Трек с альбомом: id="999", album.id="888" (явно различаются)
-        track_with_album = SimpleNamespace(
-            id="999",
-            title="Album Track",
-            artists=[SimpleNamespace(name="Artist")],
-            duration_ms=180000,
-            available=True,
-            albums=[SimpleNamespace(id="888")],  # Трек имеет альбом
-        )
+        track_with_album = create_mock_track("999", "Album Track", "Artist", 180000, True, "888")
 
         raw = {
             "batchId": "batch1",
@@ -936,22 +954,8 @@ class TestYandexMusicClientSearchTracks:
     @pytest.mark.asyncio
     async def test_search_tracks_returns_tuple_of_track_info(self):
         """search_tracks() возвращает кортеж TrackInfo."""
-        track1 = SimpleNamespace(
-            id="track1",
-            title="Song 1",
-            artists=[SimpleNamespace(name="Artist A")],
-            duration_ms=180000,
-            available=True,
-            albums=[SimpleNamespace(id="album1")],
-        )
-        track2 = SimpleNamespace(
-            id="track2",
-            title="Song 2",
-            artists=[SimpleNamespace(name="Artist B")],
-            duration_ms=240000,
-            available=True,
-            albums=[SimpleNamespace(id="album2")],
-        )
+        track1 = create_mock_track("track1", "Song 1", "Artist A", 180000, True, "album1")
+        track2 = create_mock_track("track2", "Song 2", "Artist B", 240000, True, "album2")
 
         search_result = SimpleNamespace(
             tracks=SimpleNamespace(results=[track1, track2])
@@ -975,13 +979,13 @@ class TestYandexMusicClientSearchTracks:
     async def test_search_tracks_respects_limit(self):
         """search_tracks() возвращает не больше limit треков."""
         tracks = [
-            SimpleNamespace(
-                id=f"track{i}",
-                title=f"Song {i}",
-                artists=[SimpleNamespace(name="Artist")],
-                duration_ms=180000,
-                available=True,
-                albums=[SimpleNamespace(id=f"album{i}")],
+            create_mock_track(
+                f"track{i}",
+                f"Song {i}",
+                "Artist",
+                180000,
+                True,
+                f"album{i}",
             )
             for i in range(5)
         ]
@@ -1003,21 +1007,11 @@ class TestYandexMusicClientSearchTracks:
     @pytest.mark.asyncio
     async def test_search_tracks_skips_unavailable_tracks(self):
         """search_tracks() пропускает недоступные треки (available=False)."""
-        available_track = SimpleNamespace(
-            id="track1",
-            title="Available",
-            artists=[SimpleNamespace(name="Artist")],
-            duration_ms=180000,
-            available=True,
-            albums=[SimpleNamespace(id="album1")],
+        available_track = create_mock_track(
+            "track1", "Available", "Artist", 180000, True, "album1"
         )
-        unavailable_track = SimpleNamespace(
-            id="track2",
-            title="Unavailable",
-            artists=[SimpleNamespace(name="Artist")],
-            duration_ms=180000,
-            available=False,
-            albums=[SimpleNamespace(id="album2")],
+        unavailable_track = create_mock_track(
+            "track2", "Unavailable", "Artist", 180000, False, "album2"
         )
 
         search_result = SimpleNamespace(
@@ -1070,14 +1064,7 @@ class TestYandexMusicClientSearchTracks:
     @pytest.mark.asyncio
     async def test_search_tracks_constructs_composite_feedback_id(self):
         """search_tracks() собирает feedback_id как <track_id>:<album_id>."""
-        track = SimpleNamespace(
-            id="track123",
-            title="Song",
-            artists=[SimpleNamespace(name="Artist")],
-            duration_ms=180000,
-            available=True,
-            albums=[SimpleNamespace(id="album456")],
-        )
+        track = create_mock_track("track123", "Song", "Artist", 180000, True, "album456")
 
         search_result = SimpleNamespace(tracks=SimpleNamespace(results=[track]))
         mock_client = MagicMock()

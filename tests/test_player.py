@@ -22,6 +22,7 @@ def make_track(track_id, title="Song", feedback_id=None):
         title=title,
         artists="Artist",
         duration=180.0,
+            cover_url="https://example.com/cover.jpg",
         raw=None,
     )
 
@@ -297,6 +298,7 @@ class TestPlayerQueuePreview:
             title="Song1",
             artists="Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
         mock_session.upcoming.return_value = [track1]
@@ -438,7 +440,8 @@ class TestPlaybackCallbackIdentity:
         # Set up player with a current track and source
         player._session = fake_session
         current_track = TrackInfo(
-            id="1", feedback_id="1:1", title="Current", artists="Artist", duration=100.0, raw=None
+            id="1", feedback_id="1:1", title="Current", artists="Artist", duration=100.0,
+            cover_url="https://example.com/cover.jpg", raw=None
         )
         current_source = MagicMock()  # The actual current source
         current_source.elapsed = 50.0
@@ -478,6 +481,7 @@ class TestGuildPlayerStartWaveFromTrack:
             title="Test Song",
             artists="Test Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
 
@@ -520,6 +524,7 @@ class TestGuildPlayerStartWaveFromTrack:
             title="Test Song",
             artists="Test Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
 
@@ -559,6 +564,7 @@ class TestGuildPlayerStartWaveFromTrack:
             title="Test Song",
             artists="The Beatles & Pink Floyd",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
 
@@ -608,6 +614,7 @@ class TestGuildPlayerStartWaveFromTrack:
             title="Song",
             artists="Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
 

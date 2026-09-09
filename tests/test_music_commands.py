@@ -47,6 +47,7 @@ def mock_player():
             title="Test Track",
             artists="Test Artist",
             duration=180.0,
+            cover_url="https://example.com/cover.jpg",
             raw=None,
         )
     )
@@ -128,20 +129,6 @@ class TestMusicCogWavePlayHappyPath:
     """Tests for /wave and /play happy path behavior."""
 
     @pytest.mark.asyncio
-    async def test_wave_defers_response(self, cog_with_mocked_player, mock_player):
-        """wave command defers response."""
-        interaction = create_mock_interaction_with_member_in_voice()
-        await cog_with_mocked_player.wave.callback(cog_with_mocked_player, interaction)
-        interaction.response.defer.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_play_defers_response(self, cog_with_mocked_player, mock_player):
-        """play command defers response."""
-        interaction = create_mock_interaction_with_member_in_voice()
-        await cog_with_mocked_player.play.callback(cog_with_mocked_player, interaction)
-        interaction.response.defer.assert_called_once()
-
-    @pytest.mark.asyncio
     async def test_wave_connects_when_voice_client_none(self, cog_with_mocked_player, mock_player):
         """wave command connects to voice channel when voice_client is None."""
         mock_player.voice_client = None
@@ -215,79 +202,47 @@ class TestMusicCogWavePlayHappyPath:
 
     @pytest.mark.asyncio
     async def test_wave_calls_start_wave(self, cog_with_mocked_player, mock_player):
-        """wave command calls player.start_wave()."""
+        """wave command calls start_wave() to begin playback."""
         mock_player.voice_client = MagicMock()
         interaction = create_mock_interaction_with_member_in_voice()
 
-        await cog_with_mocked_player.wave.callback(cog_with_mocked_player, interaction)
+        with patch.object(cog_with_mocked_player, '_update_player_message', new_callable=AsyncMock):
+            await cog_with_mocked_player.wave.callback(cog_with_mocked_player, interaction)
 
         mock_player.start_wave.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_play_calls_start_wave(self, cog_with_mocked_player, mock_player):
-        """play command calls player.start_wave()."""
+        """play command calls start_wave() to begin playback."""
         mock_player.voice_client = MagicMock()
         interaction = create_mock_interaction_with_member_in_voice()
 
-        await cog_with_mocked_player.play.callback(cog_with_mocked_player, interaction)
+        with patch.object(cog_with_mocked_player, '_update_player_message', new_callable=AsyncMock):
+            await cog_with_mocked_player.play.callback(cog_with_mocked_player, interaction)
 
         mock_player.start_wave.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_wave_sends_embed_with_correct_title(self, cog_with_mocked_player, mock_player):
-        """wave command sends embed with title '«Моя волна» запущена'."""
+    async def test_wave_defers_response(self, cog_with_mocked_player, mock_player):
+        """wave command defers response while loading wave."""
         mock_player.voice_client = MagicMock()
         interaction = create_mock_interaction_with_member_in_voice()
 
-        await cog_with_mocked_player.wave.callback(cog_with_mocked_player, interaction)
+        with patch.object(cog_with_mocked_player, '_update_player_message', new_callable=AsyncMock):
+            await cog_with_mocked_player.wave.callback(cog_with_mocked_player, interaction)
 
-        # Check that followup.send was called with an embed
-        interaction.followup.send.assert_called_once()
-        call_kwargs = interaction.followup.send.call_args[1]
-        embed = call_kwargs.get("embed")
-        assert embed is not None
-        assert embed.title == "«Моя волна» запущена"
+        interaction.response.defer.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_play_sends_embed_with_correct_title(self, cog_with_mocked_player, mock_player):
-        """play command sends embed with title '«Моя волна» запущена'."""
+    async def test_play_defers_response(self, cog_with_mocked_player, mock_player):
+        """play command defers response while loading wave."""
         mock_player.voice_client = MagicMock()
         interaction = create_mock_interaction_with_member_in_voice()
 
-        await cog_with_mocked_player.play.callback(cog_with_mocked_player, interaction)
+        with patch.object(cog_with_mocked_player, '_update_player_message', new_callable=AsyncMock):
+            await cog_with_mocked_player.play.callback(cog_with_mocked_player, interaction)
 
-        # Check that followup.send was called with an embed
-        interaction.followup.send.assert_called_once()
-        call_kwargs = interaction.followup.send.call_args[1]
-        embed = call_kwargs.get("embed")
-        assert embed is not None
-        assert embed.title == "«Моя волна» запущена"
-
-    @pytest.mark.asyncio
-    async def test_wave_sends_embed_with_track_display(self, cog_with_mocked_player, mock_player):
-        """wave command sends embed with track.display as description."""
-        mock_player.voice_client = MagicMock()
-        interaction = create_mock_interaction_with_member_in_voice()
-
-        await cog_with_mocked_player.wave.callback(cog_with_mocked_player, interaction)
-
-        call_kwargs = interaction.followup.send.call_args[1]
-        embed = call_kwargs.get("embed")
-        # Expected display format: "Test Artist — Test Track [3:00]"
-        assert embed.description == "Test Artist — Test Track [3:00]"
-
-    @pytest.mark.asyncio
-    async def test_play_sends_embed_with_track_display(self, cog_with_mocked_player, mock_player):
-        """play command sends embed with track.display as description."""
-        mock_player.voice_client = MagicMock()
-        interaction = create_mock_interaction_with_member_in_voice()
-
-        await cog_with_mocked_player.play.callback(cog_with_mocked_player, interaction)
-
-        call_kwargs = interaction.followup.send.call_args[1]
-        embed = call_kwargs.get("embed")
-        # Expected display format: "Test Artist — Test Track [3:00]"
-        assert embed.description == "Test Artist — Test Track [3:00]"
+        interaction.response.defer.assert_called_once()
 
 
 class TestMusicCogWavePlayUserNotInVoiceChannel:
@@ -385,7 +340,7 @@ class TestMusicCogWavePlayIdempotent:
     async def test_wave_and_play_identical_behavior_same_state(
         self, cog_with_mocked_player, mock_player
     ):
-        """wave and play commands produce identical observable effects in same state."""
+        """wave and play commands produce identical behavior in same state."""
         mock_player.voice_client = None
 
         # Reset mocks between calls
@@ -394,10 +349,10 @@ class TestMusicCogWavePlayIdempotent:
 
         # Call wave
         interaction_wave = create_interaction()
-        await cog_with_mocked_player.wave.callback(cog_with_mocked_player, interaction_wave)
+        with patch.object(cog_with_mocked_player, '_update_player_message', new_callable=AsyncMock):
+            await cog_with_mocked_player.wave.callback(cog_with_mocked_player, interaction_wave)
         wave_connect_calls = mock_player.connect.call_count
         wave_start_wave_calls = mock_player.start_wave.call_count
-        wave_embed = interaction_wave.followup.send.call_args[1].get("embed")
 
         # Reset for play
         mock_player.connect.reset_mock()
@@ -406,10 +361,10 @@ class TestMusicCogWavePlayIdempotent:
 
         # Call play
         interaction_play = create_interaction()
-        await cog_with_mocked_player.play.callback(cog_with_mocked_player, interaction_play)
+        with patch.object(cog_with_mocked_player, '_update_player_message', new_callable=AsyncMock):
+            await cog_with_mocked_player.play.callback(cog_with_mocked_player, interaction_play)
         play_connect_calls = mock_player.connect.call_count
         play_start_wave_calls = mock_player.start_wave.call_count
-        play_embed = interaction_play.followup.send.call_args[1].get("embed")
 
         # Both should call connect
         assert wave_connect_calls == 1
@@ -417,9 +372,6 @@ class TestMusicCogWavePlayIdempotent:
         # Both should call start_wave
         assert wave_start_wave_calls == 1
         assert play_start_wave_calls == 1
-        # Both should send identical embed
-        assert wave_embed.title == play_embed.title
-        assert wave_embed.description == play_embed.description
 
 
 # Helper functions

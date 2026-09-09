@@ -60,6 +60,7 @@ def make_track(track_id, title="Song", feedback_id=None):
         title=title,
         artists="Artist",
         duration=180.0,
+            cover_url="https://example.com/cover.jpg",
         raw=None,
     )
 
