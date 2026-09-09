@@ -23,11 +23,6 @@ EMBED_COLOR = discord.Color.gold()
 
 _BASS_CHOICES = [app_commands.Choice(name=level.label, value=level.value) for level in BassLevel]
 
-#: Ширина полосы прогресса в символах (без учёта текста времени рядом).
-_PROGRESS_BAR_WIDTH = 10
-_PROGRESS_BAR_FILLED = "▰"
-_PROGRESS_BAR_EMPTY = "▱"
-
 
 def format_duration(seconds: float) -> str:
     """Форматирует длительность как M:SS, либо H:MM:SS для длительностей от часа."""
@@ -37,22 +32,6 @@ def format_duration(seconds: float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
-
-
-def render_progress_bar(elapsed: float, duration: float) -> str | None:
-    """Строит текстовую полосу прогресса вида «▰▰▰▰▱▱▱▱▱▱ 1:23 / 3:55».
-
-    Возвращает `None`, если длительность неизвестна или нулевая (бывает у
-    отдельных треков волны) — рисовать полосу тогда нечем, вызывающий код
-    должен в этом случае показать только название трека.
-    """
-    if duration <= 0:
-        return None
-    clamped_elapsed = max(0.0, min(elapsed, duration))
-    filled = round(_PROGRESS_BAR_WIDTH * clamped_elapsed / duration)
-    filled = max(0, min(_PROGRESS_BAR_WIDTH, filled))
-    bar = _PROGRESS_BAR_FILLED * filled + _PROGRESS_BAR_EMPTY * (_PROGRESS_BAR_WIDTH - filled)
-    return f"{bar} {format_duration(clamped_elapsed)} / {format_duration(duration)}"
 
 
 def build_player_embed(player: GuildPlayer, color: discord.Color) -> discord.Embed:
@@ -65,9 +44,16 @@ def build_player_embed(player: GuildPlayer, color: discord.Color) -> discord.Emb
     Порядок в embed'е сверху вниз — author → title → большая картинка →
     footer. Обложка ставится большой картинкой (`set_image`), а Discord не
     даёт разместить произвольный текст НИЖЕ такой картинки — только footer.
-    Раз по ТЗ именно там (под обложкой) должны быть исполнитель, название и
-    прогресс, footer — единственное подходящее место; это осознанный
-    компромисс структуры embed'а, а не недосмотр.
+    Раз по ТЗ именно там (под обложкой) должны быть исполнитель и название,
+    footer — единственное подходящее место; это осознанный компромисс
+    структуры embed'а, а не недосмотр.
+
+    Полосы прогресса здесь намеренно нет: сообщение перерисовывается только
+    по событиям (смена трека, нажатия кнопок), а не по таймеру. "Убегающий"
+    таймер в такой схеме всегда показывал бы 0:00 — секундная точность
+    потребовала бы постоянно править сообщение и упёрлась бы в лимиты
+    Discord на частоту правок. Поэтому в footer — только статичная общая
+    длительность трека, которая обновления не требует.
     """
     track = player.current
     info = None
@@ -94,10 +80,9 @@ def build_player_embed(player: GuildPlayer, color: discord.Color) -> discord.Emb
     if track.cover_url is not None:
         embed.set_image(url=track.cover_url)
 
-    bar = render_progress_bar(info.elapsed, track.duration)
     footer_text = f"{track.artists} — {track.title}"
-    if bar is not None:
-        footer_text = f"{footer_text}\n{bar}"
+    if track.duration > 0:
+        footer_text = f"{footer_text} • {format_duration(track.duration)}"
     embed.set_footer(text=footer_text)
     return embed
 
@@ -156,8 +141,16 @@ class MusicCog(commands.Cog, name="Музыка"):
         берёт актуальное состояние `self._player` в момент вызова. Расхождения
         не будет — `_play_track_locked` обновляет состояние плеера ДО вызова
         этого колбэка (см. докстринг `GuildPlayer`).
+
+        `reposition=True`: старт трека — это и есть "смена трека" из ТЗ на
+        пересоздание (см. докстринг `_update_player_message`). Колбэк
+        срабатывает одинаково и при обычном автопереходе, и при запуске
+        волны из /wave, /search или кнопки «Следующий» — GuildPlayer не
+        различает эти причины, и это осознанно: если к моменту старта трека
+        плеер оказался погребён под перепиской, его стоит поднять в любом
+        из этих случаев.
         """
-        await self._update_player_message()
+        await self._update_player_message(reposition=True)
 
     async def _handle_stopped(self) -> None:
         """Отражает остановку волны в сообщении-плеере — колбэк `GuildPlayer.on_stopped`.
@@ -165,10 +158,14 @@ class MusicCog(commands.Cog, name="Музыка"):
         Срабатывает событийно (см. `GuildPlayer._stop_locked_state`), а не по
         опросу: `on_stopped` гарантирует однократность и молчит, если волна и
         не запускалась, поэтому здесь достаточно просто перерисовать сообщение.
+        Остановка волны не входит в список событий, требующих пересоздания
+        (см. `_update_player_message`), — правим на месте.
         """
         await self._update_player_message()
 
-    async def _update_player_message(self, interaction: discord.Interaction | None = None) -> None:
+    async def _update_player_message(
+        self, interaction: discord.Interaction | None = None, *, reposition: bool = False
+    ) -> None:
         """Обновляет сообщение-плеер на месте, либо отправляет новое, если старого не осталось.
 
         Единственная точка правки сообщения-плеера: сюда идут и колбэк
@@ -185,6 +182,18 @@ class MusicCog(commands.Cog, name="Музыка"):
         прикреплена, успели удалить вручную, `edit_message` упадёт
         `discord.NotFound` — в этом случае, как и когда сохранённого
         сообщения ещё/уже нет, отправляется новое и запоминается.
+
+        `reposition` — явный параметр, а не догадка по контексту (в чате
+        неоткуда достоверно узнать, "значимое" ли это событие, кроме как
+        спросив вызывающий код). `True` просят только источники значимых
+        событий — старт трека (`_announce`), который покрывает в том числе
+        и запуск волны после выбора в поиске: тогда, если плеер успел
+        оказаться не последним сообщением канала (`не self._player_message_is_last()`),
+        старое сообщение удаляется и отправляется новое — оно и станет
+        последним. При обычных нажатиях кнопок (пауза, следующий, отключить)
+        параметр остаётся `False`, и сообщение правится на месте: если бы
+        каждое нажатие могло пересоздавать сообщение, активная переписка в
+        канале заставляла бы бота бесконечно перевыкладывать плеер и спамить.
 
         Каждый успешный путь заканчивается вызовом `_replace_player_view` —
         она же и фиксирует, каким сообщением/вью сейчас владеет ког.
@@ -212,14 +221,20 @@ class MusicCog(commands.Cog, name="Музыка"):
             if (interaction is None or interaction.response.is_done()) and (
                 self._player_message is not None
             ):
-                try:
-                    await self._player_message.edit(
-                        embed=embed, view=view, allowed_mentions=mentions
-                    )
-                    self._replace_player_view(view, message=self._player_message)
-                    return
-                except discord.NotFound:
-                    self._player_message = None
+                if reposition and not self._player_message_is_last():
+                    # Плеер погребён под более новыми сообщениями — редактировать
+                    # его на месте бессмысленно, он всё равно останется не
+                    # последним. Удаляем и падаем ниже, в отправку нового.
+                    await self._delete_player_message()
+                else:
+                    try:
+                        await self._player_message.edit(
+                            embed=embed, view=view, allowed_mentions=mentions
+                        )
+                        self._replace_player_view(view, message=self._player_message)
+                        return
+                    except discord.NotFound:
+                        self._player_message = None
 
             if interaction is not None:
                 if interaction.response.is_done():
@@ -240,6 +255,45 @@ class MusicCog(commands.Cog, name="Музыка"):
                 embed=embed, view=view, allowed_mentions=mentions
             )
             self._replace_player_view(view, message=message)
+
+    def _player_message_is_last(self) -> bool:
+        """Проверяет, остаётся ли `self._player_message` последним сообщением своего канала.
+
+        Дешёвая проверка без похода в историю канала: `channel.last_message_id`
+        уже закеширован клиентом по гейтвею при каждом новом сообщении, и
+        сравнение с ним не стоит отдельного HTTP-запроса. Вызывается только
+        когда `self._player_message` уже не `None` (см. `_update_player_message`),
+        но на случай нетипичного канала без атрибута `last_message_id`
+        считаем, что плеер НЕ последний, — лучше лишний раз пересоздать
+        сообщение, чем оставить его молча погребённым под перепиской.
+        """
+        message = self._player_message
+        if message is None:
+            return True
+        last_id = getattr(message.channel, "last_message_id", None)
+        if last_id is None:
+            return False
+        return last_id == message.id
+
+    async def _delete_player_message(self) -> None:
+        """Удаляет устаревшее сообщение-плеер перед тем, как отправить новое взамен.
+
+        Вызывается только когда `_update_player_message` уже решила
+        пересоздать сообщение (см. её докстринг про `reposition`). Удаление
+        может не получиться: `discord.NotFound` — сообщение уже удалили
+        (вручную или другим путём), `discord.Forbidden` — у бота нет права
+        удалять сообщения в этом канале. Ни то, ни другое не должно прерывать
+        обновление плеера — просто забываем о старом сообщении и создаём
+        новое ниже по `_update_player_message`.
+        """
+        message = self._player_message
+        self._player_message = None
+        if message is None:
+            return
+        try:
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden):
+            logger.warning("Не удалось удалить устаревшее сообщение-плеер при пересоздании")
 
     def _replace_player_view(
         self, view: PlayerView, *, message: discord.Message | discord.InteractionMessage

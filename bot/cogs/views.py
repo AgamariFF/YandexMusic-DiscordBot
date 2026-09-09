@@ -135,7 +135,16 @@ class TrackSearchView(discord.ui.View):
         return True
 
     async def handle_selection(self, interaction: discord.Interaction, track: TrackInfo) -> None:
-        """Отключает меню и делегирует запуск волны колбэку, показывая пользователю итог."""
+        """Отключает меню, удаляет его сообщение и делегирует запуск волны колбэку.
+
+        Раньше сообщение меню правилось на "Выбрано: ..." и оставалось
+        висеть в канале — а к этому моменту сообщение-плеер уже могло
+        обновиться колбэком `_announce` и оказаться СТАРШЕ меню, то есть не
+        последним сообщением канала. Владелец прямо просил, чтобы после
+        выбора в чате оставался только плеер, поэтому вместо правки текста
+        меню теперь: пустой `defer()` (взаимодействию нужен хоть какой-то
+        ответ) и удаление самого сообщения меню — см. `_delete_message`.
+        """
         if self._handled:
             # Уже обрабатывается или обработан другим (более ранним) выбором —
             # волну повторно не запускаем и сообщение не трогаем. Но совсем
@@ -154,14 +163,8 @@ class TrackSearchView(discord.ui.View):
         self._handled = True
         self._disable_all_items()
         try:
-            await interaction.response.edit_message(
-                content=f"Выбрано: {track.display}",
-                # track.display собран из названия и исполнителя, пришедших от
-                # Яндекса, — полагаться, что там не окажется текста вида упоминания
-                # роли, не стоит; тот же канал, что и у остального ответа бота.
-                allowed_mentions=discord.AllowedMentions.none(),
-                view=self,
-            )
+            await interaction.response.defer()
+            await self._delete_message(interaction)
             await self._on_select(interaction, track)
         except BotError as exc:
             logger.warning("Ошибка запуска волны после выбора трека: %s", exc)
@@ -173,6 +176,21 @@ class TrackSearchView(discord.ui.View):
             )
         finally:
             self.stop()
+
+    @staticmethod
+    async def _delete_message(interaction: discord.Interaction) -> None:
+        """Удаляет сообщение меню после ответа на взаимодействие.
+
+        Удаление может не получиться: `discord.NotFound` — сообщение уже
+        удалили (например, кто-то вручную), `discord.Forbidden` — у бота нет
+        права удалять сообщения в этом канале. Ни то, ни другое не должно
+        останавливать запуск волны — трек уже выбран и его нужно доиграть,
+        даже если список результатов так и останется висеть в чате.
+        """
+        try:
+            await interaction.delete_original_response()
+        except (discord.NotFound, discord.Forbidden):
+            logger.warning("Не удалось удалить сообщение меню выбора трека")
 
     @staticmethod
     async def _send_followup_error(interaction: discord.Interaction, text: str) -> None:
