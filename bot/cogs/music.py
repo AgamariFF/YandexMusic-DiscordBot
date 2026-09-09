@@ -121,9 +121,13 @@ class MusicCog(commands.Cog, name="Музыка"):
         self._config = config
         self._client = client
         self._announce_channel: discord.abc.Messageable | None = None
-        # Единственное сообщение-плеер сервера и лок, под которым идёт любая
-        # его правка — подробности см. в докстринге `_update_player_message`.
+        # Единственное сообщение-плеер сервера, его текущий PlayerView и лок,
+        # под которым идёт любая правка — подробности см. в докстринге
+        # `_update_player_message`. `_player_view` нужен отдельно от
+        # `_player_message`, чтобы `_replace_player_view` могла остановить
+        # предыдущий экземпляр вью (см. её докстринг про рост ViewStore).
         self._player_message: discord.Message | discord.InteractionMessage | None = None
+        self._player_view: PlayerView | None = None
         self._player_message_lock = asyncio.Lock()
         self._player = GuildPlayer(
             client,
@@ -140,7 +144,9 @@ class MusicCog(commands.Cog, name="Музыка"):
         return self._player
 
     async def cog_unload(self) -> None:
-        """Корректно отключает плеер от голосового канала при выгрузке кога."""
+        """Останавливает текущий PlayerView и отключает плеер при выгрузке кога."""
+        if self._player_view is not None:
+            self._player_view.stop()
         await self._player.disconnect()
 
     async def _announce(self, track: TrackInfo, wave_description: str | None) -> None:
@@ -179,6 +185,9 @@ class MusicCog(commands.Cog, name="Музыка"):
         прикреплена, успели удалить вручную, `edit_message` упадёт
         `discord.NotFound` — в этом случае, как и когда сохранённого
         сообщения ещё/уже нет, отправляется новое и запоминается.
+
+        Каждый успешный путь заканчивается вызовом `_replace_player_view` —
+        она же и фиксирует, каким сообщением/вью сейчас владеет ког.
         """
         async with self._player_message_lock:
             embed = build_player_embed(self._player, EMBED_COLOR)
@@ -190,6 +199,9 @@ class MusicCog(commands.Cog, name="Музыка"):
                     await interaction.response.edit_message(
                         embed=embed, view=view, allowed_mentions=mentions
                     )
+                    # edit_message правит именно то сообщение, к которому
+                    # прикреплена нажатая кнопка, — это и есть interaction.message.
+                    self._replace_player_view(view, message=interaction.message)
                     return
                 except discord.NotFound:
                     # Сообщение с кнопкой удалили вручную; response ещё не
@@ -204,27 +216,52 @@ class MusicCog(commands.Cog, name="Музыка"):
                     await self._player_message.edit(
                         embed=embed, view=view, allowed_mentions=mentions
                     )
+                    self._replace_player_view(view, message=self._player_message)
                     return
                 except discord.NotFound:
                     self._player_message = None
 
             if interaction is not None:
                 if interaction.response.is_done():
-                    self._player_message = await interaction.followup.send(
+                    message = await interaction.followup.send(
                         embed=embed, view=view, allowed_mentions=mentions, wait=True
                     )
                 else:
                     await interaction.response.send_message(
                         embed=embed, view=view, allowed_mentions=mentions
                     )
-                    self._player_message = await interaction.original_response()
+                    message = await interaction.original_response()
+                self._replace_player_view(view, message=message)
                 return
 
             if self._announce_channel is None:
                 return
-            self._player_message = await self._announce_channel.send(
+            message = await self._announce_channel.send(
                 embed=embed, view=view, allowed_mentions=mentions
             )
+            self._replace_player_view(view, message=message)
+
+    def _replace_player_view(
+        self, view: PlayerView, *, message: discord.Message | discord.InteractionMessage
+    ) -> None:
+        """Запоминает новые сообщение и view, останавливая предыдущий view.
+
+        Новый `PlayerView` пересоздаётся при каждом обновлении (см. докстринг
+        класса), а его кнопки получают случайные `custom_id`. discord.py
+        хранит соответствие "сообщение → активные компоненты" во внутреннем
+        `ViewStore`, и при каждой правке с `view=...` добавляет туда записи
+        нового вью, но НЕ убирает записи предыдущего — они с другими
+        `custom_id`, и раз это не единый персистентный вью с фиксированными
+        `custom_id`, стору просто неоткуда узнать, что старый экземпляр уже
+        никому не нужен. Без явной остановки они копились бы там вечно, пока
+        жива волна. `View.stop()` как раз и вызывает `ViewStore.remove_view`,
+        снимая записи именно старого экземпляра.
+        """
+        old_view = self._player_view
+        self._player_message = message
+        self._player_view = view
+        if old_view is not None:
+            old_view.stop()
 
     async def handle_pause_toggle(self, interaction: discord.Interaction) -> None:
         """Переключает паузу/воспроизведение по кнопке плеера и правит сообщение на месте.
@@ -318,19 +355,36 @@ class MusicCog(commands.Cog, name="Музыка"):
         self._announce_channel = interaction.channel
 
     async def _send_started_ack(self, interaction: discord.Interaction) -> None:
-        """Короткое эфемерное подтверждение запуска волны.
+        """Подтверждает запуск волны, правя исходный ответ, а не отправляя новый.
 
         Раньше команды слали публичный embed «Моя волна запущена» отдельным
         сообщением на каждый запуск, а `_announce` — ещё один embed на
         каждый трек: получался спам параллельно с сообщением-плеером. Теперь
         сам плеер — единственное публичное сообщение (его к этому моменту
         уже обновил колбэк `_announce`), а на взаимодействие всё равно нужно
-        ответить, иначе Discord покажет пользователю ошибку, — поэтому здесь
-        только короткое эфемерное "ок".
+        ответить.
+
+        Раньше здесь стоял `interaction.followup.send(..., ephemeral=True)`.
+        Проблема: `/search` и модальное окно поиска откладывают ответ
+        публично (`defer()`/`defer(thinking=True)`, без `ephemeral=True`) —
+        Discord показывает всем «Бот думает…» как настоящее сообщение в
+        канале. Эфемерный followup его никак не резолвит: приватное
+        сообщение уходило одному пользователю, а публичный плейсхолдер так и
+        оставался висеть нерешённым. `edit_original_response` правит именно
+        тот самый первый ответ — тот же приём, что и в `_send_error` — поэтому
+        плейсхолдер всегда получает финальный текст, каким бы он ни был
+        отложен: публичным (тогда и подтверждение публичное) или эфемерным
+        (`_start_wave` — тогда и подтверждение эфемерное). `embed`/`view`
+        сбрасываются явно: если ответ уже редактировался раньше (например,
+        `TrackSearchView.handle_selection` подставила туда меню выбора), от
+        него не должно остаться следов.
         """
         text = "«Моя волна» запущена — смотрите сообщение-плеер в канале."
         if interaction.response.is_done():
-            await interaction.followup.send(text, ephemeral=True)
+            try:
+                await interaction.edit_original_response(content=text, embed=None, view=None)
+            except discord.HTTPException:  # NotFound — её подкласс
+                await interaction.followup.send(text, ephemeral=True)
         else:
             await interaction.response.send_message(text, ephemeral=True)
 
