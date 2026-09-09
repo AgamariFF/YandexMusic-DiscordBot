@@ -134,12 +134,19 @@ class MusicCog(commands.Cog, name="Музыка"):
             await self._player.connect(channel)
         self._announce_channel = interaction.channel
 
-    @staticmethod
-    async def _send_wave_started(interaction: discord.Interaction, track: TrackInfo) -> None:
-        """Отправляет единый embed запуска волны — общий для команд и меню выбора трека."""
+    async def _send_wave_started(self, interaction: discord.Interaction, track: TrackInfo) -> None:
+        """Отправляет единый embed запуска волны — общий для команд и меню выбора трека.
+
+        Поле "Волна" берётся из `GuildPlayer.wave_description` уже ПОСЛЕ
+        старта сессии, поэтому для волны от трека в нём видно, от какого
+        именно трека она построена, а не просто общий заголовок — иначе
+        пользователь, выбравший трек из меню поиска, не увидел бы в ответе
+        никакого следа своего выбора.
+        """
         embed = discord.Embed(
             title="«Моя волна» запущена", description=track.display, color=EMBED_COLOR
         )
+        embed.add_field(name="Волна", value=self._player.wave_description or "—", inline=False)
         await interaction.followup.send(embed=embed)
 
     async def _start_wave(self, interaction: discord.Interaction) -> None:
