@@ -208,7 +208,14 @@ class MusicCog(commands.Cog, name="Музыка"):
         tracks = await self._client.search_tracks(query, limit=MAX_SEARCH_RESULTS)
 
         if not tracks:
-            await interaction.followup.send(f"Ничего не найдено по запросу «{query}».")
+            await interaction.followup.send(
+                f"Ничего не найдено по запросу «{query}».",
+                # query — свободный текст пользователя, бот создан без глобального
+                # allowed_mentions (см. bot/__main__.py), поэтому без явного none()
+                # упоминание роли или @everyone внутри запроса ушло бы как
+                # настоящий пинг от имени бота.
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
 
         if len(tracks) == 1:
@@ -220,6 +227,9 @@ class MusicCog(commands.Cog, name="Музыка"):
         )
         message = await interaction.followup.send(
             f"Найдено несколько треков по запросу «{query}», выберите нужный:",
+            # См. комментарий выше про allowed_mentions: query здесь тоже
+            # подставляется в текст сообщения.
+            allowed_mentions=discord.AllowedMentions.none(),
             view=view,
             wait=True,
         )

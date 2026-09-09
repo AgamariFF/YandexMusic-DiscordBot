@@ -39,7 +39,7 @@ class TrackSelect(discord.ui.Select["TrackSearchView"]):
             discord.SelectOption(
                 label=_truncate(f"{track.artists} — {track.title}"),
                 description=_truncate(_option_description(track)),
-                value=_truncate(str(index), limit=_OPTION_TEXT_LIMIT),
+                value=str(index),
             )
             for index, track in enumerate(tracks)
         ]
@@ -82,6 +82,10 @@ class TrackSearchView(discord.ui.View):
         self._author_id = author_id
         self._on_select = on_select
         self._message: discord.Message | discord.InteractionMessage | None = None
+        # discord.py запускает каждый callback компонента отдельной задачей, поэтому
+        # два быстрых выбора подряд могут обработаться параллельно ещё до того, как
+        # первый успеет отключить компоненты, — этот флаг закрывает гонку.
+        self._handled = False
         self.add_item(TrackSelect(tracks))
 
     def attach_message(self, message: discord.Message | discord.InteractionMessage) -> None:
@@ -99,10 +103,20 @@ class TrackSearchView(discord.ui.View):
 
     async def handle_selection(self, interaction: discord.Interaction, track: TrackInfo) -> None:
         """Отключает меню и делегирует запуск волны колбэку, показывая пользователю итог."""
+        if self._handled:
+            # Уже обрабатывается или обработан другим (более ранним) выбором —
+            # тихо выходим, не запуская волну повторно и не трогая сообщение.
+            return
+        self._handled = True
         self._disable_all_items()
         try:
             await interaction.response.edit_message(
-                content=f"Выбрано: {track.display}", view=self
+                content=f"Выбрано: {track.display}",
+                # track.display собран из названия и исполнителя, пришедших от
+                # Яндекса, — полагаться, что там не окажется текста вида упоминания
+                # роли, не стоит; тот же канал, что и у остального ответа бота.
+                allowed_mentions=discord.AllowedMentions.none(),
+                view=self,
             )
             await self._on_select(interaction, track)
         except BotError as exc:
