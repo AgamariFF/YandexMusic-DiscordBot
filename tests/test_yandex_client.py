@@ -1118,3 +1118,71 @@ class TestYandexMusicClientSearchTracks:
 
         with pytest.raises(SearchUnavailableError):
             await client.search_tracks("test")
+
+
+class TestYandexMusicClientCoverUrl:
+    """Тесты для извлечения cover_url в _track_info_from_track."""
+
+    def test_track_info_from_track_extracts_cover_uri_with_correct_size(self):
+        """_track_info_from_track использует cover_uri и подставляет размер 400x400."""
+        cover_template = (
+            "avatars.yandex.net/get-music-content/95061/4f3808a0.a.5307396-3/%%"
+        )
+        track = create_mock_track(
+            "track123",
+            "Test Song",
+            "Test Artist",
+            duration_ms=180000,
+            available=True,
+            album_id="album456",
+            cover_uri=cover_template,
+        )
+
+        track_info = YandexMusicClient._track_info_from_track(track)
+
+        # Проверяем что cover_url содержит размер 400x400
+        assert track_info is not None
+        assert track_info.cover_url is not None
+        assert "400x400" in track_info.cover_url
+        assert track_info.cover_url == cover_template.replace("%%", "400x400")
+
+    def test_track_info_from_track_fallback_og_image_when_no_cover_uri(self):
+        """_track_info_from_track использует og_image если cover_uri отсутствует."""
+        og_template = "avatars.yandex.net/get-music-content/backup/og_image/%%"
+        track = create_mock_track(
+            "track123",
+            "Test Song",
+            "Test Artist",
+            duration_ms=180000,
+            available=True,
+            album_id="album456",
+            cover_uri=None,
+            og_image=og_template,
+        )
+
+        track_info = YandexMusicClient._track_info_from_track(track)
+
+        # Проверяем что используется og_image с размером 400x400
+        assert track_info is not None
+        assert track_info.cover_url is not None
+        assert "400x400" in track_info.cover_url
+        assert track_info.cover_url == og_template.replace("%%", "400x400")
+
+    def test_track_info_from_track_cover_url_none_when_no_cover_sources(self):
+        """_track_info_from_track возвращает cover_url=None если нет cover_uri или og_image."""
+        track = create_mock_track(
+            "track123",
+            "Test Song",
+            "Test Artist",
+            duration_ms=180000,
+            available=True,
+            album_id="album456",
+            cover_uri=None,
+            og_image=None,
+        )
+
+        track_info = YandexMusicClient._track_info_from_track(track)
+
+        # Проверяем что cover_url None
+        assert track_info is not None
+        assert track_info.cover_url is None
