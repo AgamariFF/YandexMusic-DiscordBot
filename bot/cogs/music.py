@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.audio.bassboost import BassLevel
+from bot.cogs.views import MAX_SEARCH_RESULTS, TrackSearchView
 from bot.config import Config
 from bot.errors import BotError, NotInVoiceChannelError
 from bot.player import GuildPlayer
@@ -48,6 +49,7 @@ class MusicCog(commands.Cog, name="Музыка"):
         """Создаёт единственный GuildPlayer, обслуживающий сервер бота."""
         self._bot = bot
         self._config = config
+        self._client = client
         self._announce_channel: discord.abc.Messageable | None = None
         self._player = GuildPlayer(
             client,
@@ -66,11 +68,17 @@ class MusicCog(commands.Cog, name="Музыка"):
         """Корректно отключает плеер от голосового канала при выгрузке кога."""
         await self._player.disconnect()
 
-    async def _announce(self, track: TrackInfo) -> None:
-        """Отправляет анонс нового трека в последний канал запуска волны, если он известен."""
+    async def _announce(self, track: TrackInfo, wave_description: str | None) -> None:
+        """Отправляет анонс нового трека в последний канал запуска волны, если он известен.
+
+        `wave_description` — это `GuildPlayer.wave_description` на момент старта
+        трека; он может быть `None`, если колбэк почему-то сработал раньше
+        создания сессии волны (штатно такого не бывает, но падать здесь нельзя).
+        """
         if self._announce_channel is None:
             return
         embed = discord.Embed(title="Сейчас играет", description=track.display, color=EMBED_COLOR)
+        embed.add_field(name="Волна", value=wave_description or "—", inline=False)
         await self._announce_channel.send(embed=embed)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -112,18 +120,48 @@ class MusicCog(commands.Cog, name="Музыка"):
         else:
             await interaction.response.send_message(text, ephemeral=True)
 
-    async def _start_wave(self, interaction: discord.Interaction) -> None:
-        """Запускает «Мою волну», при необходимости подключаясь к каналу пользователя."""
-        await interaction.response.defer()
+    async def _ensure_connected(self, interaction: discord.Interaction) -> None:
+        """Подключается к каналу вызвавшего пользователя, если плеер ещё не в канале.
+
+        Общая часть `_start_wave` и `_start_wave_from_track`: обе запускают
+        волну «на живую» и должны заходить в голосовой канал ровно в момент
+        старта, а не раньше (иначе бот молча зайдёт в канал даже тогда, когда
+        волна так и не запустится, например пользователь не выбрал трек из
+        меню поиска).
+        """
         if self._player.voice_client is None:
             channel = _voice_channel_of(interaction)
             await self._player.connect(channel)
         self._announce_channel = interaction.channel
-        track = await self._player.start_wave()
+
+    @staticmethod
+    async def _send_wave_started(interaction: discord.Interaction, track: TrackInfo) -> None:
+        """Отправляет единый embed запуска волны — общий для команд и меню выбора трека."""
         embed = discord.Embed(
             title="«Моя волна» запущена", description=track.display, color=EMBED_COLOR
         )
         await interaction.followup.send(embed=embed)
+
+    async def _start_wave(self, interaction: discord.Interaction) -> None:
+        """Запускает «Мою волну», при необходимости подключаясь к каналу пользователя."""
+        await interaction.response.defer()
+        await self._ensure_connected(interaction)
+        track = await self._player.start_wave()
+        await self._send_wave_started(interaction, track)
+
+    async def _start_wave_from_track(
+        self, interaction: discord.Interaction, track: TrackInfo
+    ) -> None:
+        """Запускает волну от выбранного трека: используется командой поиска и меню выбора.
+
+        Подходит для обоих случаев ответа: и когда `interaction.response` ещё
+        не использован (одиночный результат поиска, после `defer()`), и когда
+        он уже израсходован на `edit_message` (выбор из меню) — в обоих
+        случаях ответ уходит через `interaction.followup`.
+        """
+        await self._ensure_connected(interaction)
+        started_track = await self._player.start_wave_from_track(track)
+        await self._send_wave_started(interaction, started_track)
 
     @app_commands.command(name="join", description="Подключиться к голосовому каналу")
     @app_commands.guild_only()
@@ -153,6 +191,32 @@ class MusicCog(commands.Cog, name="Музыка"):
     async def play(self, interaction: discord.Interaction) -> None:
         """Запускает «Мою волну», при необходимости подключаясь к каналу пользователя."""
         await self._start_wave(interaction)
+
+    @app_commands.command(name="search", description="Найти трек и запустить «Мою волну» от него")
+    @app_commands.describe(query="Что искать: исполнитель и/или название трека")
+    @app_commands.guild_only()
+    async def search(self, interaction: discord.Interaction, query: str) -> None:
+        """Ищет треки по запросу: один найденный — сразу волна от него, несколько — меню выбора."""
+        await interaction.response.defer()
+        tracks = await self._client.search_tracks(query, limit=MAX_SEARCH_RESULTS)
+
+        if not tracks:
+            await interaction.followup.send(f"Ничего не найдено по запросу «{query}».")
+            return
+
+        if len(tracks) == 1:
+            await self._start_wave_from_track(interaction, tracks[0])
+            return
+
+        view = TrackSearchView(
+            tracks=tracks, author_id=interaction.user.id, on_select=self._start_wave_from_track
+        )
+        message = await interaction.followup.send(
+            f"Найдено несколько треков по запросу «{query}», выберите нужный:",
+            view=view,
+            wait=True,
+        )
+        view.attach_message(message)
 
     @app_commands.command(name="skip", description="Пропустить текущий трек")
     @app_commands.guild_only()
@@ -218,11 +282,12 @@ class MusicCog(commands.Cog, name="Музыка"):
     @app_commands.command(name="nowplaying", description="Показать текущий трек")
     @app_commands.guild_only()
     async def nowplaying(self, interaction: discord.Interaction) -> None:
-        """Показывает исполнителя, название, прогресс, громкость и уровень бас-буста."""
+        """Показывает исполнителя, название, волну, прогресс, громкость и уровень бас-буста."""
         info = self._player.now_playing()
         embed = discord.Embed(
             title="Сейчас играет", description=info.track.display, color=EMBED_COLOR
         )
+        embed.add_field(name="Волна", value=self._player.wave_description or "—", inline=False)
         elapsed = format_duration(info.elapsed)
         total = format_duration(info.track.duration)
         embed.add_field(name="Прогресс", value=f"{elapsed} / {total}")
