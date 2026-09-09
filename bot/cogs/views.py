@@ -12,59 +12,84 @@ from bot.yandex import TrackInfo
 
 logger = logging.getLogger(__name__)
 
-#: Discord режет `label`/`description`/`value` опции селекта до 100 символов —
-#: превышение лимита не отклоняется мягко, а роняет запрос к API целиком.
-_OPTION_TEXT_LIMIT = 100
-#: Разрешённый Discord максимум — 25 опций, но меню читается заметно хуже уже
-#: при таком количестве; ограничиваем более скромным и удобным числом.
-MAX_SEARCH_RESULTS = 10
+#: Discord помещает в один ряд не больше пяти компонентов — ограничиваем
+#: результаты поиска этим числом, чтобы все кнопки выбора трека были видны
+#: сразу, без второго ряда и прокрутки. Яндекс и так возвращает результаты
+#: по релевантности, так что достаточно первых пяти — это и есть «самые
+#: подходящие».
+MAX_SEARCH_RESULTS = 5
 #: Время жизни меню выбора: по истечении компоненты отключаются сами, чтобы в
 #: чате не оставалось «живое» меню, которое уже ничего не сделает.
 SELECT_TIMEOUT_SECONDS = 60.0
+#: Лимит длины одной строки нумерованного списка треков в embed'е. Исполнитель
+#: и название приходят от Яндекса без гарантий по длине — аномально длинная
+#: строка и портит список, и рискует упереться в лимиты embed'а Discord.
+_LIST_LINE_LIMIT = 100
 
 
-def _truncate(text: str, limit: int = _OPTION_TEXT_LIMIT) -> str:
-    """Обрезает текст до лимита Discord, добавляя многоточие при обрезке."""
+def _truncate(text: str, limit: int = _LIST_LINE_LIMIT) -> str:
+    """Обрезает текст до лимита, добавляя многоточие при обрезке."""
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
 
 
-class TrackSelect(discord.ui.Select["TrackSearchView"]):
-    """Выпадающий список найденных треков."""
+def numbered_tracks(tracks: tuple[TrackInfo, ...]) -> list[tuple[int, TrackInfo]]:
+    """Нумерует треки с единицы — единственный источник правды для нумерации.
 
-    def __init__(self, tracks: tuple[TrackInfo, ...]) -> None:
-        """Строит опции селекта из результатов поиска, обрезая текст под лимиты Discord."""
-        options = [
-            discord.SelectOption(
-                label=_truncate(f"{track.artists} — {track.title}"),
-                description=_truncate(_option_description(track)),
-                value=str(index),
-            )
-            for index, track in enumerate(tracks)
-        ]
-        super().__init__(placeholder="Выберите трек…", options=options, min_values=1, max_values=1)
-        self._tracks = tracks
+    Им пользуется и `TrackSearchView` при сборке кнопок, и `build_search_embed`
+    при сборке списка треков в сообщении. Раз счётчик один на двоих, номер на
+    кнопке и номер в списке разъехаться не могут в принципе.
+    """
+    return list(enumerate(tracks, start=1))
+
+
+def build_search_embed(
+    query: str, tracks: tuple[TrackInfo, ...], color: discord.Color
+) -> discord.Embed:
+    """Собирает embed со списком найденных треков для сообщения с меню выбора.
+
+    Раньше названия треков были видны только внутри выпадающего списка;
+    кнопки же подписаны только номерами (см. `TrackButton`), поэтому сам
+    список — единственное место, где пользователь видит, что нашлось и что
+    именно выбирает. Нумерация берётся из `numbered_tracks`, той же функции,
+    которой пользуется `TrackSearchView` для кнопок.
+
+    Цвет принимается параметром, а не читается константой модуля: `EMBED_COLOR`
+    определён в `bot.cogs.music`, и импорт оттуда сюда закольцевал бы модули
+    (music.py уже импортирует из views.py).
+    """
+    lines = [
+        f"**{number}.** {_truncate(track.display)}" for number, track in numbered_tracks(tracks)
+    ]
+    return discord.Embed(
+        title=f"Найдено несколько треков по запросу «{_truncate(query)}»",
+        description="\n".join(lines),
+        color=color,
+    )
+
+
+class TrackButton(discord.ui.Button["TrackSearchView"]):
+    """Кнопка выбора одного трека из результатов поиска."""
+
+    def __init__(self, number: int, track: TrackInfo) -> None:
+        """Подписывает кнопку номером трека, а не его названием.
+
+        Подпись кнопки Discord ограничивает 80 символами, а до пяти кнопок
+        делят ширину одного ряда — «Артист — Название» на такой кнопке
+        превратится в нечитаемый огрызок. Сам трек пользователь читает в
+        сообщении со списком (`build_search_embed`), кнопка нужна только
+        для выбора.
+        """
+        super().__init__(label=str(number), style=discord.ButtonStyle.secondary, row=0)
+        self._track = track
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        """Обрабатывает выбор трека: запускает волну от него и обновляет сообщение."""
+        """Обрабатывает нажатие: запускает волну от выбранного трека и обновляет сообщение."""
         view = self.view
         if view is None:
             return
-        index = int(self.values[0])
-        track = self._tracks[index]
-        await view.handle_selection(interaction, track)
-
-
-def _option_description(track: TrackInfo) -> str:
-    """Строит вторичную строку опции: длительность и альбом (если он есть в raw)."""
-    minutes, seconds = divmod(int(max(0.0, track.duration)), 60)
-    duration = f"{minutes}:{seconds:02d}"
-    album_title = getattr(track.raw, "albums", None)
-    album_name = album_title[0].title if album_title else None
-    if album_name:
-        return f"{duration} • {album_name}"
-    return duration
+        await view.handle_selection(interaction, self._track)
 
 
 class TrackSearchView(discord.ui.View):
@@ -86,7 +111,8 @@ class TrackSearchView(discord.ui.View):
         # два быстрых выбора подряд могут обработаться параллельно ещё до того, как
         # первый успеет отключить компоненты, — этот флаг закрывает гонку.
         self._handled = False
-        self.add_item(TrackSelect(tracks))
+        for number, track in numbered_tracks(tracks):
+            self.add_item(TrackButton(number, track))
 
     def attach_message(self, message: discord.Message | discord.InteractionMessage) -> None:
         """Сохраняет ссылку на отправленное сообщение — она нужна для правки после таймаута."""
@@ -160,7 +186,7 @@ class TrackSearchView(discord.ui.View):
             logger.warning("Не удалось отключить меню выбора трека после таймаута")
 
     def _disable_all_items(self) -> None:
-        """Отключает все компоненты меню (используется и при выборе, и по таймауту)."""
+        """Отключает все кнопки меню (используется и при выборе, и по таймауту)."""
         for item in self.children:
-            if isinstance(item, discord.ui.Select):
+            if isinstance(item, discord.ui.Button):
                 item.disabled = True

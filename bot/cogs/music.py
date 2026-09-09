@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.audio.bassboost import BassLevel
-from bot.cogs.views import MAX_SEARCH_RESULTS, TrackSearchView
+from bot.cogs.views import MAX_SEARCH_RESULTS, TrackSearchView, build_search_embed
 from bot.config import Config
 from bot.errors import BotError, NotInVoiceChannelError
 from bot.player import GuildPlayer
@@ -226,9 +226,11 @@ class MusicCog(commands.Cog, name="Музыка"):
             tracks=tracks, author_id=interaction.user.id, on_select=self._start_wave_from_track
         )
         message = await interaction.followup.send(
-            f"Найдено несколько треков по запросу «{query}», выберите нужный:",
-            # См. комментарий выше про allowed_mentions: query здесь тоже
-            # подставляется в текст сообщения.
+            embed=build_search_embed(query, tracks, EMBED_COLOR),
+            # См. комментарий выше про allowed_mentions: query подставляется в
+            # текст embed'а. Discord и так не резолвит упоминания внутри
+            # embed'ов в пинги, но параметр держим — это дешёвая защита,
+            # которую однажды уже пришлось вернуть после регресса.
             allowed_mentions=discord.AllowedMentions.none(),
             view=view,
             wait=True,
