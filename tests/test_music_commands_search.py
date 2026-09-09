@@ -6,7 +6,7 @@ import discord
 import discord.ext.commands
 import pytest
 
-from bot.cogs.views import TrackSearchView, TrackSelect, _truncate
+from bot.cogs.views import TrackSearchView, _truncate, build_search_embed
 from bot.config import Config
 from bot.yandex.client import TrackInfo
 
@@ -181,29 +181,83 @@ class TestTrackSearchViewSelection:
         assert call_args[0][1] == track
 
 
-class TestTrackSelectTruncation:
-    """Тесты для обрезки длинных названий в TrackSelect."""
+class TestTrackButtonLabels:
+    """Тесты для подписей и поведения кнопок TrackButton."""
 
-    def test_track_select_truncates_long_label(self):
-        """TrackSelect обрезает длинное название до 100 символов."""
-        long_artist = "A" * 60
-        long_title = "B" * 60
-        track = TrackInfo(
-            id="track1",
-            feedback_id="track1:album1",
-            title=long_title,
-            artists=long_artist,
-            duration=180.0,
-            raw=None,
+    def test_track_buttons_created_for_each_track(self):
+        """Для каждого трека создаётся кнопка."""
+        tracks = (
+            TrackInfo(
+                id="track1",
+                feedback_id="track1:album1",
+                title="Song 1",
+                artists="Artist 1",
+                duration=180.0,
+                raw=None,
+            ),
+            TrackInfo(
+                id="track2",
+                feedback_id="track2:album2",
+                title="Song 2",
+                artists="Artist 2",
+                duration=200.0,
+                raw=None,
+            ),
+            TrackInfo(
+                id="track3",
+                feedback_id="track3:album3",
+                title="Song 3",
+                artists="Artist 3",
+                duration=220.0,
+                raw=None,
+            ),
         )
 
-        select = TrackSelect((track,))
-        option = select.options[0]
+        on_select = AsyncMock()
+        view = TrackSearchView(
+            tracks=tracks, author_id=12345, on_select=on_select
+        )
 
-        assert len(option.label) <= 100
-        full_text = f"{long_artist} — {long_title}"
-        if len(full_text) > 100:
-            assert option.label.endswith("…")
+        buttons = [item for item in view.children if isinstance(item, discord.ui.Button)]
+        assert len(buttons) == len(tracks), (
+            f"Должно быть {len(tracks)} кнопок, получено {len(buttons)}"
+        )
+
+    def test_button_labels_are_numbers_starting_from_one(self):
+        """Подписи кнопок - номера начиная с 1."""
+        tracks = (
+            TrackInfo(
+                id="track1",
+                feedback_id="track1:album1",
+                title="Song 1",
+                artists="Artist 1",
+                duration=180.0,
+                raw=None,
+            ),
+            TrackInfo(
+                id="track2",
+                feedback_id="track2:album2",
+                title="Song 2",
+                artists="Artist 2",
+                duration=200.0,
+                raw=None,
+            ),
+        )
+
+        on_select = AsyncMock()
+        view = TrackSearchView(
+            tracks=tracks, author_id=12345, on_select=on_select
+        )
+
+        buttons = [item for item in view.children if isinstance(item, discord.ui.Button)]
+        assert len(buttons) == 2
+
+        assert buttons[0].label == "1", (
+            f"Первая кнопка должна быть '1', получено {buttons[0].label}"
+        )
+        assert buttons[1].label == "2", (
+            f"Вторая кнопка должна быть '2', получено {buttons[1].label}"
+        )
 
     def test_truncate_function_respects_limit(self):
         """_truncate функция обрезает текст до лимита с многоточием."""
@@ -221,22 +275,152 @@ class TestTrackSelectTruncation:
         assert result == short_text
 
 
+class TestSearchEmbedBuild:
+    """Тесты для build_search_embed."""
+
+    def test_build_search_embed_contains_numbered_list(self):
+        """build_search_embed содержит нумерованный список треков."""
+        tracks = (
+            TrackInfo(
+                id="track1",
+                feedback_id="track1:album1",
+                title="Song 1",
+                artists="Artist 1",
+                duration=180.0,
+                raw=None,
+            ),
+            TrackInfo(
+                id="track2",
+                feedback_id="track2:album2",
+                title="Song 2",
+                artists="Artist 2",
+                duration=200.0,
+                raw=None,
+            ),
+        )
+
+        embed = build_search_embed("test query", tracks, 0x3498db)
+
+        assert embed.description is not None
+        assert "**1.**" in embed.description, "Первый трек должен быть с номером 1"
+        assert "**2.**" in embed.description, "Второй трек должен быть с номером 2"
+        assert "Artist 1" in embed.description
+        assert "Song 1" in embed.description
+        assert "Artist 2" in embed.description
+        assert "Song 2" in embed.description
+
+    def test_build_search_embed_title_contains_query(self):
+        """Заголовок embed содержит запрос пользователя."""
+        tracks = (
+            TrackInfo(
+                id="track1",
+                feedback_id="track1:album1",
+                title="Song",
+                artists="Artist",
+                duration=180.0,
+                raw=None,
+            ),
+        )
+
+        query = "my search query"
+        embed = build_search_embed(query, tracks, 0x3498db)
+
+        assert query in embed.title, f"Запрос '{query}' должен быть в заголовке '{embed.title}'"
+
+    def test_max_search_results_limit_is_five(self):
+        """MAX_SEARCH_RESULTS равен 5."""
+        from bot.cogs.views import MAX_SEARCH_RESULTS
+
+        assert MAX_SEARCH_RESULTS == 5, (
+            f"MAX_SEARCH_RESULTS должен быть 5, получено {MAX_SEARCH_RESULTS}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_button_click_third_track_calls_on_select(self):
+        """Нажатие на третью кнопку запускает на_select с третьим треком."""
+
+        tracks = (
+            TrackInfo(
+                id="track1",
+                feedback_id="track1:album1",
+                title="Song 1",
+                artists="Artist 1",
+                duration=180.0,
+                raw=None,
+            ),
+            TrackInfo(
+                id="track2",
+                feedback_id="track2:album2",
+                title="Song 2",
+                artists="Artist 2",
+                duration=200.0,
+                raw=None,
+            ),
+            TrackInfo(
+                id="track3",
+                feedback_id="track3:album3",
+                title="Song 3",
+                artists="Artist 3",
+                duration=220.0,
+                raw=None,
+            ),
+        )
+
+        on_select = AsyncMock()
+        view = TrackSearchView(
+            tracks=tracks, author_id=12345, on_select=on_select
+        )
+
+        # Находим третью кнопку (с label="3")
+        buttons = [item for item in view.children if isinstance(item, discord.ui.Button)]
+        third_button = buttons[2]
+        assert third_button.label == "3"
+
+        # Имитируем нажатие на третью кнопку
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.response.edit_message = AsyncMock()
+        interaction.followup = AsyncMock()
+        interaction.user = MagicMock()
+        interaction.user.id = 12345
+
+        await third_button.callback(interaction)
+
+        # Проверяем что on_select был вызван с третьим треком
+        on_select.assert_called_once()
+        call_args = on_select.call_args
+        selected_track = call_args[0][1]
+        assert selected_track.id == "track3", (
+            f"Должен быть трек 3, получен {selected_track.id}"
+        )
+
+
 class TestTrackSearchViewTimeout:
     """Тесты для таймаута TrackSearchView."""
 
     @pytest.mark.asyncio
-    async def test_on_timeout_disables_items(self):
-        """on_timeout отключает компоненты меню."""
-        track = TrackInfo(
-            id="track1",
-            feedback_id="track1:album1",
-            title="Song",
-            artists="Artist",
-            duration=180.0,
-            raw=None,
+    async def test_on_timeout_disables_buttons(self):
+        """on_timeout отключает кнопки."""
+        tracks = (
+            TrackInfo(
+                id="track1",
+                feedback_id="track1:album1",
+                title="Song 1",
+                artists="Artist",
+                duration=180.0,
+                raw=None,
+            ),
+            TrackInfo(
+                id="track2",
+                feedback_id="track2:album2",
+                title="Song 2",
+                artists="Artist",
+                duration=180.0,
+                raw=None,
+            ),
         )
         on_select = AsyncMock()
-        view = TrackSearchView(tracks=(track,), author_id=12345, on_select=on_select)
+        view = TrackSearchView(tracks=tracks, author_id=12345, on_select=on_select)
 
         message = MagicMock()
         message.edit = AsyncMock()
@@ -244,9 +428,11 @@ class TestTrackSearchViewTimeout:
 
         await view.on_timeout()
 
-        for item in view.children:
-            if hasattr(item, "disabled"):
-                assert item.disabled is True
+        # Проверяем что все кнопки отключены
+        buttons = [item for item in view.children if isinstance(item, discord.ui.Button)]
+        assert len(buttons) > 0, "Должны быть кнопки"
+        for button in buttons:
+            assert button.disabled is True, f"Кнопка с label={button.label} должна быть отключена"
         message.edit.assert_called_once()
 
 
