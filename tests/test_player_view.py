@@ -5,76 +5,10 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-from bot.cogs.music import build_player_embed, render_progress_bar
+from bot.cogs.music import build_player_embed
 from bot.cogs.player_view import PlayerController, PlayerView
 from bot.player import GuildPlayer, PlayerState
 from bot.yandex import TrackInfo
-
-
-class TestRenderProgressBar:
-    """Тесты для функции render_progress_bar."""
-
-    def test_render_progress_bar_zero_duration_returns_none(self):
-        """render_progress_bar возвращает None при нулевой длительности."""
-        result = render_progress_bar(0.0, 0.0)
-        assert result is None
-
-    def test_render_progress_bar_negative_duration_returns_none(self):
-        """render_progress_bar возвращает None при отрицательной длительности."""
-        result = render_progress_bar(0.0, -10.0)
-        assert result is None
-
-    def test_render_progress_bar_zero_elapsed_at_start(self):
-        """render_progress_bar показывает пустую полосу в начале трека."""
-        result = render_progress_bar(0.0, 100.0)
-        assert result is not None
-        # Первый символ должен быть пустой ▱
-        assert result.startswith("▱" * 10)
-        assert "0:00 / 1:40" in result
-
-    def test_render_progress_bar_full_at_end(self):
-        """render_progress_bar показывает полную полосу в конце трека."""
-        result = render_progress_bar(100.0, 100.0)
-        assert result is not None
-        # Все символы заполнены ▰
-        assert result.startswith("▰" * 10)
-        assert "1:40 / 1:40" in result
-
-    def test_render_progress_bar_half_way(self):
-        """render_progress_bar показывает примерно половину полосы в середине."""
-        result = render_progress_bar(50.0, 100.0)
-        assert result is not None
-        # Примерно половина должна быть заполнена
-        assert result.startswith("▰" * 5)
-        assert "0:50 / 1:40" in result
-
-    def test_render_progress_bar_clamps_elapsed_to_duration(self):
-        """render_progress_bar ограничивает позицию длительностью.
-
-        Если позиция больше длительности (гонка), полоса не падает и показывает
-        максимум.
-        """
-        result = render_progress_bar(150.0, 100.0)
-        assert result is not None
-        # Позиция зажата к длительности, полоса полная
-        assert result.startswith("▰" * 10)
-        assert "1:40 / 1:40" in result
-
-    def test_render_progress_bar_negative_elapsed_clamped_to_zero(self):
-        """render_progress_bar ограничивает отрицательную позицию нулём."""
-        result = render_progress_bar(-10.0, 100.0)
-        assert result is not None
-        # Позиция зажата к нулю, полоса пустая
-        assert result.startswith("▱" * 10)
-        assert "0:00 / 1:40" in result
-
-    def test_render_progress_bar_format(self):
-        """render_progress_bar возвращает строку в правильном формате."""
-        result = render_progress_bar(123.0, 300.0)
-        assert result is not None
-        # Формат: <10 символов полосы> <время> / <время>
-        assert len(result.split(" ")[0]) == 10  # Ровно 10 символов полосы
-        assert " 2:03 / 5:00" in result
 
 
 class TestBuildPlayerEmbed:
@@ -201,10 +135,10 @@ class TestBuildPlayerEmbed:
         assert "Test Artist" in embed.footer.text
         assert "Test Track" in embed.footer.text
 
-    def test_build_player_embed_footer_includes_progress_bar(
+    def test_build_player_embed_footer_includes_duration(
         self, track_info, color
     ):
-        """build_player_embed включает полосу прогресса в footer."""
+        """build_player_embed включает длительность в footer через „ • "."""
         player = MagicMock(spec=GuildPlayer)
         player.current = track_info
         player.state = PlayerState.PLAYING
@@ -216,9 +150,9 @@ class TestBuildPlayerEmbed:
         embed = build_player_embed(player, color)
 
         assert embed.footer is not None
-        # Полоса содержит ▰/▱ и время
-        assert "▰" in embed.footer.text or "▱" in embed.footer.text
-        assert "1:30 / 3:00" in embed.footer.text
+        # Footer содержит длительность через „ • "
+        assert "•" in embed.footer.text
+        assert "3:00" in embed.footer.text
 
     def test_build_player_embed_handles_nothing_playing_error(
         self, track_info, color

@@ -778,8 +778,8 @@ class TestAllowedMentionsProtection:
         assert allowed_mentions.users is False
 
     @pytest.mark.asyncio
-    async def test_track_selection_edit_message_has_allowed_mentions_none(self):
-        """edit_message в handle_selection содержит allowed_mentions=none()."""
+    async def test_track_selection_deletes_menu_after_choice(self):
+        """handle_selection удаляет меню после выбора и запускает волну."""
         track = TrackInfo(
             id="selected_track",
             feedback_id="selected_track:album1",
@@ -796,26 +796,13 @@ class TestAllowedMentionsProtection:
 
         interaction = AsyncMock()
         interaction.response = AsyncMock()
-        interaction.response.edit_message = AsyncMock()
-        interaction.followup = AsyncMock()
+        interaction.delete_original_response = AsyncMock()
 
         await view.handle_selection(interaction, track)
 
-        interaction.response.edit_message.assert_called_once()
-
-        call_args = interaction.response.edit_message.call_args
-        assert "allowed_mentions" in call_args[1], (
-            "Параметр allowed_mentions должен быть передан для edit_message"
-        )
-
-        allowed_mentions = call_args[1]["allowed_mentions"]
-        assert allowed_mentions is not None
-        assert allowed_mentions.everyone is False, (
-            f"allowed_mentions.everyone должен быть False, получено {allowed_mentions.everyone}"
-        )
-        assert allowed_mentions.roles is False, (
-            f"allowed_mentions.roles должен быть False, получено {allowed_mentions.roles}"
-        )
-        assert allowed_mentions.users is False, (
-            f"allowed_mentions.users должен быть False, получено {allowed_mentions.users}"
-        )
+        # Проверяем, что взаимодействие было отложено
+        interaction.response.defer.assert_called_once()
+        # Проверяем, что исходное сообщение (меню) было удалено
+        interaction.delete_original_response.assert_called_once()
+        # Проверяем, что on_select был вызван (он получает interaction и track)
+        on_select.assert_called_once()
