@@ -80,8 +80,15 @@ class TrackButton(discord.ui.Button["TrackSearchView"]):
         превратится в нечитаемый огрызок. Сам трек пользователь читает в
         сообщении со списком (`build_search_embed`), кнопка нужна только
         для выбора.
+
+        Ряд вычисляется из номера, а не захардкожен: при нынешнем лимите
+        `MAX_SEARCH_RESULTS = 5` все кнопки и так попадают в ряд 0, но если
+        лимит когда-нибудь поднимут, шестая и последующие кнопки просто уйдут
+        на следующий ряд (Discord допускает до пяти рядов по пять кнопок),
+        а не уронят конструктор `TrackSearchView` ошибкой переполнения ряда.
         """
-        super().__init__(label=str(number), style=discord.ButtonStyle.secondary, row=0)
+        row = (number - 1) // 5
+        super().__init__(label=str(number), style=discord.ButtonStyle.secondary, row=row)
         self._track = track
 
     async def callback(self, interaction: discord.Interaction) -> None:
