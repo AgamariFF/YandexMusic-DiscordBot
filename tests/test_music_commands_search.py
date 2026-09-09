@@ -11,6 +11,32 @@ from bot.config import Config
 from bot.yandex.client import TrackInfo
 
 
+def create_mock_interaction():
+    """Create a basic mock interaction."""
+    interaction = AsyncMock(spec=discord.Interaction)
+    interaction.response = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    interaction.channel = MagicMock()
+    return interaction
+
+
+def create_mock_interaction_with_member_in_voice():
+    """Create a mock interaction with user as Member in a voice channel."""
+    interaction = create_mock_interaction()
+
+    member = MagicMock(spec=discord.Member)
+    voice_channel = MagicMock(spec=discord.VoiceChannel)
+    voice_channel.id = 9999
+    voice_state = MagicMock()
+    voice_state.channel = voice_channel
+    member.voice = voice_state
+
+    interaction.user = member
+    return interaction
+
+
 @pytest.fixture
 def mock_config_search():
     """Create a mock Config for search tests."""
@@ -222,3 +248,85 @@ class TestTrackSearchViewTimeout:
             if hasattr(item, "disabled"):
                 assert item.disabled is True
         message.edit.assert_called_once()
+
+
+class TestSearchCommandBranching:
+    """Тесты для ветвления команды /search (один трек vs несколько)."""
+
+    @pytest.mark.asyncio
+    async def test_search_single_track_starts_wave_no_menu(self, cog_with_search):
+        """Поиск одного трека запускает волну сразу без меню."""
+        cog, mock_client, mock_player = cog_with_search
+
+        track = TrackInfo(
+            id="single_track",
+            feedback_id="single_track:album1",
+            title="Only Song",
+            artists="Solo Artist",
+            duration=180.0,
+            raw=None,
+        )
+
+        mock_client.search_tracks = AsyncMock(return_value=(track,))
+        mock_player.start_wave_from_track = AsyncMock(return_value=track)
+
+        interaction = create_mock_interaction_with_member_in_voice()
+
+        await cog.search.callback(cog, interaction, "single")
+
+        mock_player.start_wave_from_track.assert_called_once_with(track)
+
+        for call in interaction.followup.send.call_args_list:
+            if "view" in call[1]:
+                pytest.fail("Меню не должно создаваться для одного найденного трека")
+
+    @pytest.mark.asyncio
+    async def test_search_multiple_tracks_creates_menu_no_immediate_wave(
+        self, cog_with_search
+    ):
+        """Поиск нескольких треков создаёт меню, волна не запускается сразу."""
+        cog, mock_client, mock_player = cog_with_search
+
+        tracks = (
+            TrackInfo(
+                id="track1",
+                feedback_id="track1:album1",
+                title="Song 1",
+                artists="Artist 1",
+                duration=180.0,
+                raw=None,
+            ),
+            TrackInfo(
+                id="track2",
+                feedback_id="track2:album2",
+                title="Song 2",
+                artists="Artist 2",
+                duration=200.0,
+                raw=None,
+            ),
+            TrackInfo(
+                id="track3",
+                feedback_id="track3:album3",
+                title="Song 3",
+                artists="Artist 3",
+                duration=220.0,
+                raw=None,
+            ),
+        )
+
+        mock_client.search_tracks = AsyncMock(return_value=tracks)
+        mock_player.start_wave_from_track = AsyncMock()
+
+        message_mock = MagicMock()
+        interaction = create_mock_interaction_with_member_in_voice()
+        interaction.followup.send = AsyncMock(return_value=message_mock)
+
+        await cog.search.callback(cog, interaction, "multiple")
+
+        mock_player.start_wave_from_track.assert_not_called()
+
+        interaction.followup.send.assert_called_once()
+        call_args = interaction.followup.send.call_args
+        assert "view" in call_args[1]
+        view = call_args[1]["view"]
+        assert isinstance(view, TrackSearchView)
