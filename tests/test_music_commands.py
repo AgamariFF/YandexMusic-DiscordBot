@@ -603,3 +603,72 @@ class TestMusicCogUpdatePlayerMessageRepositioning:
         cog_with_player._delete_player_message.assert_not_called()
         # Но старое сообщение должно быть отредактировано
         old_message.edit.assert_called_once()
+
+
+class TestMusicCogSendStartedAck:
+    """Тесты для _send_started_ack и запасного пути при HTTPException."""
+
+    @pytest.fixture
+    def cog_with_player(self, mock_config, mock_client, mock_bot):
+        """MusicCog для тестирования."""
+        cog = MusicCog(mock_bot, mock_config, mock_client)
+        return cog
+
+    @pytest.mark.asyncio
+    async def test_send_started_ack_response_not_done_sends_message(
+        self, cog_with_player
+    ):
+        """_send_started_ack отправляет сообщение если response ещё не использован."""
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.is_done = MagicMock(return_value=False)
+
+        await cog_with_player._send_started_ack(interaction)
+
+        # Проверяем что response.send_message был вызван
+        interaction.response.send_message.assert_called_once()
+        call_args = interaction.response.send_message.call_args
+        assert call_args[1]["ephemeral"] is True
+
+    @pytest.mark.asyncio
+    async def test_send_started_ack_fallback_when_edit_fails(self, cog_with_player):
+        """_send_started_ack использует followup.send при HTTPException."""
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.is_done = MagicMock(return_value=True)
+        # edit_original_response бросает NotFound (подкласс HTTPException)
+        response_mock = MagicMock()
+        response_mock.status = 404
+        interaction.edit_original_response = AsyncMock(
+            side_effect=discord.NotFound(response_mock, "Not Found")
+        )
+        interaction.followup = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await cog_with_player._send_started_ack(interaction)
+
+        # Проверяем что edit_original_response был вызван
+        interaction.edit_original_response.assert_called_once()
+        # Проверяем что fallback через followup.send был использован
+        interaction.followup.send.assert_called_once()
+        call_args = interaction.followup.send.call_args
+        assert call_args[0][0] == "«Моя волна» запущена — смотрите сообщение-плеер в канале."
+        assert call_args[1]["ephemeral"] is True
+
+    @pytest.mark.asyncio
+    async def test_send_started_ack_edit_success_does_not_call_followup(
+        self, cog_with_player
+    ):
+        """_send_started_ack не использует followup если edit успешна."""
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.response.is_done = MagicMock(return_value=True)
+        interaction.edit_original_response = AsyncMock()
+        interaction.followup = AsyncMock()
+
+        await cog_with_player._send_started_ack(interaction)
+
+        # Проверяем что edit_original_response был вызван
+        interaction.edit_original_response.assert_called_once()
+        # Проверяем что followup НЕ был использован
+        interaction.followup.send.assert_not_called()

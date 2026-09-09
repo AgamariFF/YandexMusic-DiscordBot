@@ -290,7 +290,7 @@ class TestMusicCogUpdatePlayerMessage:
     async def test_announce_callback_updates_player_message(
         self, mock_bot, mock_config, mock_client, track_info
     ):
-        """Колбэк _announce обновляет сообщение-плеер."""
+        """Колбэк _announce обновляет сообщение-плеер с reposition=True."""
 
         cog = MusicCog(mock_bot, mock_config, mock_client)
 
@@ -300,14 +300,14 @@ class TestMusicCogUpdatePlayerMessage:
         # Вызываем _announce
         await cog._announce(track_info, "Моя волна")
 
-        # _update_player_message был вызван
-        cog._update_player_message.assert_called_once()
+        # _update_player_message был вызван с reposition=True
+        cog._update_player_message.assert_called_once_with(reposition=True)
 
     @pytest.mark.asyncio
     async def test_handle_stopped_updates_player_message(
         self, mock_bot, mock_config, mock_client
     ):
-        """Колбэк _handle_stopped обновляет сообщение-плеер."""
+        """Колбэк _handle_stopped обновляет сообщение-плеер без пересоздания."""
         cog = MusicCog(mock_bot, mock_config, mock_client)
 
         # Мокируем _update_player_message
@@ -316,5 +316,5 @@ class TestMusicCogUpdatePlayerMessage:
         # Вызываем _handle_stopped
         await cog._handle_stopped()
 
-        # _update_player_message был вызван
-        cog._update_player_message.assert_called_once()
+        # _update_player_message был вызван БЕЗ reposition (или с reposition=False)
+        cog._update_player_message.assert_called_once_with()
