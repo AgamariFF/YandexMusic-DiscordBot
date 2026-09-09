@@ -499,3 +499,127 @@ class TestMusicCogWaveDescription:
         assert wave_field.value == wave_desc, (
             f"Значение 'Волна' должно быть '{wave_desc}', получено {wave_field.value}"
         )
+
+
+class TestAllowedMentionsProtection:
+    """Тесты для защиты от пинга ролей через user-controlled text."""
+
+    @pytest.mark.asyncio
+    async def test_search_empty_result_has_allowed_mentions_none(self, cog_with_search):
+        """Сообщение 'Ничего не найдено' содержит allowed_mentions=none()."""
+        cog, mock_client, mock_player = cog_with_search
+        mock_client.search_tracks = AsyncMock(return_value=())
+
+        interaction = create_mock_interaction()
+
+        await cog.search.callback(cog, interaction, "nonexistent")
+
+        interaction.response.defer.assert_called_once()
+        interaction.followup.send.assert_called_once()
+
+        call_args = interaction.followup.send.call_args
+        assert "allowed_mentions" in call_args[1], (
+            "Параметр allowed_mentions должен быть передан"
+        )
+
+        allowed_mentions = call_args[1]["allowed_mentions"]
+        assert allowed_mentions is not None
+        assert allowed_mentions.everyone is False, (
+            f"allowed_mentions.everyone должен быть False, получено {allowed_mentions.everyone}"
+        )
+        assert allowed_mentions.roles is False, (
+            f"allowed_mentions.roles должен быть False, получено {allowed_mentions.roles}"
+        )
+        assert allowed_mentions.users is False, (
+            f"allowed_mentions.users должен быть False, получено {allowed_mentions.users}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_search_multiple_tracks_menu_has_allowed_mentions_none(
+        self, cog_with_search
+    ):
+        """Сообщение с меню содержит allowed_mentions=none()."""
+        cog, mock_client, mock_player = cog_with_search
+
+        tracks = (
+            TrackInfo(
+                id="track1",
+                feedback_id="track1:album1",
+                title="Song 1",
+                artists="Artist 1",
+                duration=180.0,
+                raw=None,
+            ),
+            TrackInfo(
+                id="track2",
+                feedback_id="track2:album2",
+                title="Song 2",
+                artists="Artist 2",
+                duration=200.0,
+                raw=None,
+            ),
+        )
+
+        mock_client.search_tracks = AsyncMock(return_value=tracks)
+        mock_player.start_wave_from_track = AsyncMock()
+
+        message_mock = MagicMock()
+        interaction = create_mock_interaction_with_member_in_voice()
+        interaction.followup.send = AsyncMock(return_value=message_mock)
+
+        await cog.search.callback(cog, interaction, "multiple")
+
+        interaction.followup.send.assert_called_once()
+
+        call_args = interaction.followup.send.call_args
+        assert "allowed_mentions" in call_args[1], (
+            "Параметр allowed_mentions должен быть передан для меню"
+        )
+
+        allowed_mentions = call_args[1]["allowed_mentions"]
+        assert allowed_mentions is not None
+        assert allowed_mentions.everyone is False
+        assert allowed_mentions.roles is False
+        assert allowed_mentions.users is False
+
+    @pytest.mark.asyncio
+    async def test_track_selection_edit_message_has_allowed_mentions_none(self):
+        """edit_message в handle_selection содержит allowed_mentions=none()."""
+        track = TrackInfo(
+            id="selected_track",
+            feedback_id="selected_track:album1",
+            title="Selected Song",
+            artists="Selected Artist",
+            duration=180.0,
+            raw=None,
+        )
+        on_select = AsyncMock()
+        view = TrackSearchView(
+            tracks=(track,), author_id=12345, on_select=on_select
+        )
+
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.response.edit_message = AsyncMock()
+        interaction.followup = AsyncMock()
+
+        await view.handle_selection(interaction, track)
+
+        interaction.response.edit_message.assert_called_once()
+
+        call_args = interaction.response.edit_message.call_args
+        assert "allowed_mentions" in call_args[1], (
+            "Параметр allowed_mentions должен быть передан для edit_message"
+        )
+
+        allowed_mentions = call_args[1]["allowed_mentions"]
+        assert allowed_mentions is not None
+        assert allowed_mentions.everyone is False, (
+            f"allowed_mentions.everyone должен быть False, получено {allowed_mentions.everyone}"
+        )
+        assert allowed_mentions.roles is False, (
+            f"allowed_mentions.roles должен быть False, получено {allowed_mentions.roles}"
+        )
+        assert allowed_mentions.users is False, (
+            f"allowed_mentions.users должен быть False, получено {allowed_mentions.users}"
+        )
