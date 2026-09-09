@@ -9,6 +9,7 @@ import discord
 from discord.ext import commands
 
 from bot.cogs.music import MusicCog
+from bot.cogs.roulette import RouletteCog
 from bot.config import Config, load_config
 from bot.errors import ConfigError, YandexAuthError
 from bot.logging_setup import setup_logging
@@ -43,7 +44,17 @@ class WaveBot(commands.Bot):
             return
         self._yandex_client = client
 
-        await self.add_cog(MusicCog(self, self._config, client))
+        music_cog = MusicCog(self, self._config, client)
+        await self.add_cog(music_cog)
+
+        if self._config.nekto_token:
+            await self.add_cog(RouletteCog(self, self._config, music_cog.player))
+            logger.info("Чат-рулетка включена.")
+        else:
+            logger.info(
+                "NEKTO_TOKEN не задан — команды чат-рулетки отключены, "
+                "остальной функционал бота не затронут."
+            )
 
         guild = discord.Object(id=self._config.guild_id)
         self.tree.copy_global_to(guild=guild)

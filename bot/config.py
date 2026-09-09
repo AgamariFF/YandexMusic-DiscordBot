@@ -28,11 +28,15 @@ class Config:
     default_volume: float
     ffmpeg_path: str
     idle_timeout: int
+    nekto_token: str
+    nekto_user_agent: str
 
     @property
     def secrets(self) -> tuple[str, ...]:
         """Непустые значения токенов — используются для маскирования в логах."""
-        return tuple(value for value in (self.discord_token, self.yandex_token) if value)
+        return tuple(
+            value for value in (self.discord_token, self.yandex_token, self.nekto_token) if value
+        )
 
 
 def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
@@ -98,6 +102,20 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
 
     ffmpeg_path = os.environ.get("FFMPEG_PATH", "").strip() or _DEFAULT_FFMPEG_PATH
 
+    # Оба поля необязательны: без них бот запускается как обычно, просто без
+    # команд чат-рулетки (см. bot/__main__.py). Но если задано хоть одно —
+    # обязаны быть оба: сервис nekto.me сверяет токен с тем самым браузерным
+    # User-Agent, которым он был получен (подпись рукопожатия завязана на
+    # оба значения разом, см. bot/nekto/protocol.py), и токен без "своего"
+    # user-agent (или наоборот) не пройдёт рукопожатие ни при каких условиях.
+    nekto_token = os.environ.get("NEKTO_TOKEN", "").strip()
+    nekto_user_agent = os.environ.get("NEKTO_USER_AGENT", "").strip()
+    if bool(nekto_token) != bool(nekto_user_agent):
+        raise ConfigError(
+            "NEKTO_TOKEN и NEKTO_USER_AGENT должны быть заданы вместе: токен чат-рулетки "
+            "действителен только с User-Agent того же браузера, которым он был получен."
+        )
+
     return Config(
         discord_token=discord_token,
         guild_id=guild_id,
@@ -106,4 +124,6 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
         default_volume=default_volume,
         ffmpeg_path=ffmpeg_path,
         idle_timeout=idle_timeout,
+        nekto_token=nekto_token,
+        nekto_user_agent=nekto_user_agent,
     )
