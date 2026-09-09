@@ -337,7 +337,7 @@ class TestSearchEmbedBuild:
 
     @pytest.mark.asyncio
     async def test_button_click_third_track_calls_on_select(self):
-        """Нажатие на третью кнопку запускает на_select с третьим треком."""
+        """Нажатие на третью кнопку запускает on_select с третьим треком."""
 
         tracks = (
             TrackInfo(
@@ -520,6 +520,22 @@ class TestSearchCommandBranching:
         # Проверяем что подключения к каналу не произошло - бот не должен
         # заходить в канал, пока пользователь не выберет трек из меню
         mock_player.connect.assert_not_called()
+
+        # Проверяем что embed отправлен и содержит все найденные треки
+        assert "embed" in call_args[1], "embed должен быть передан в followup.send"
+        embed = call_args[1]["embed"]
+
+        assert embed.description is not None
+        # Проверяем что все три трека в описании с номерами
+        assert "**1.**" in embed.description and "Artist 1" in embed.description and (
+            "Song 1" in embed.description
+        ), "Первый трек должен быть в описании"
+        assert "**2.**" in embed.description and "Artist 2" in embed.description and (
+            "Song 2" in embed.description
+        ), "Второй трек должен быть в описании"
+        assert "**3.**" in embed.description and "Artist 3" in embed.description and (
+            "Song 3" in embed.description
+        ), "Третий трек должен быть в описании"
 
 
 class TestMusicCogWaveDescription:
