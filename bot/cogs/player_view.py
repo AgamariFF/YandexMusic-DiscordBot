@@ -58,6 +58,9 @@ class PlayerView(discord.ui.View):
     (подпись паузы/продолжения, disabled в остановленном состоянии) читается
     из `player` один раз при создании конкретного экземпляра — ровно перед
     тем, как он прикрепляется к отредактированному или новому сообщению.
+
+    Кнопка поиска — исключение: она не отключается в остановленном
+    состоянии, потому что именно ею запускается новая волна (см. `SearchButton`).
     """
 
     def __init__(self, *, player: GuildPlayer, controller: PlayerController) -> None:
@@ -69,7 +72,7 @@ class PlayerView(discord.ui.View):
         paused = player.state is PlayerState.PAUSED
         self.add_item(PauseResumeButton(paused=paused, disabled=stopped))
         self.add_item(SkipButton(disabled=stopped))
-        self.add_item(SearchButton(disabled=stopped))
+        self.add_item(SearchButton())
         self.add_item(DisconnectButton(disabled=stopped))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -79,12 +82,20 @@ class PlayerView(discord.ui.View):
         должен именно слушающий, а не любой человек из текстового чата —
         иначе кто угодно мог бы поставить чужую музыку на паузу или отключить
         бота у слушателей (см. заметку "Бот на общем сервере" в памяти проекта).
+
+        Если бот нигде не подключён (`player.channel is None` — полная
+        остановка после отключения), ограничивать нажатия по каналу нечем:
+        в этом состоянии всё равно активна только кнопка поиска (остальные
+        disabled, и Discord их нажатие никогда не пришлёт), а ей должен
+        суметь воспользоваться любой, чтобы перезапустить волну.
         """
         channel = self._player.channel
+        if channel is None:
+            return True
+
         member = interaction.user
         listening = (
-            channel is not None
-            and isinstance(member, discord.Member)
+            isinstance(member, discord.Member)
             and member.voice is not None
             and member.voice.channel is not None
             and member.voice.channel.id == channel.id
@@ -180,15 +191,19 @@ class SkipButton(discord.ui.Button["PlayerView"]):
 
 
 class SearchButton(discord.ui.Button["PlayerView"]):
-    """Кнопка поиска трека — открывает модальное окно ввода запроса."""
+    """Кнопка поиска трека — открывает модальное окно ввода запроса.
 
-    def __init__(self, *, disabled: bool) -> None:
-        """Создаёт кнопку поиска."""
+    В отличие от остальных кнопок ряда, никогда не отключается: когда волна
+    остановлена, поиск — единственное осмысленное действие, которым её можно
+    перезапустить, не набирая команду вручную.
+    """
+
+    def __init__(self) -> None:
+        """Создаёт кнопку поиска — всегда активна."""
         super().__init__(
             label="Поиск",
             emoji="🔍",
             style=discord.ButtonStyle.secondary,
-            disabled=disabled,
             row=0,
         )
 

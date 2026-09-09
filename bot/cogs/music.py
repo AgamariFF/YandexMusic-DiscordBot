@@ -13,7 +13,7 @@ from bot.audio.bassboost import BassLevel
 from bot.cogs.player_view import PlayerView
 from bot.cogs.views import MAX_SEARCH_RESULTS, TrackSearchView, build_search_embed
 from bot.config import Config
-from bot.errors import BotError, NotInVoiceChannelError
+from bot.errors import BotError, NothingPlayingError, NotInVoiceChannelError
 from bot.player import GuildPlayer, PlayerState
 from bot.yandex import TrackInfo, YandexMusicClient
 
@@ -27,12 +27,6 @@ _BASS_CHOICES = [app_commands.Choice(name=level.label, value=level.value) for le
 _PROGRESS_BAR_WIDTH = 10
 _PROGRESS_BAR_FILLED = "▰"
 _PROGRESS_BAR_EMPTY = "▱"
-#: Интервал опроса состояния плеера фоновой задачей `_watch_for_stop`. GuildPlayer
-#: не даёт колбэка на остановку волны (только `announce` на старт трека), поэтому
-#: единственный способ вовремя погасить кнопки сообщения-плеера — периодически
-#: проверять `player.state`. Секунды задержки в этом некритичны, а более частый
-#: опрос лишь без нужды нагружал бы Discord API.
-_STOP_WATCH_INTERVAL_SECONDS = 2.0
 
 
 def format_duration(seconds: float) -> str:
@@ -64,9 +58,9 @@ def render_progress_bar(elapsed: float, duration: float) -> str | None:
 def build_player_embed(player: GuildPlayer, color: discord.Color) -> discord.Embed:
     """Собирает embed единственного сообщения-плеера по текущему состоянию `GuildPlayer`.
 
-    Единственное место, где строится вид плеера: и колбэк `_announce`, и
-    каждая кнопка `PlayerView` перерисовывают сообщение через эту же функцию,
-    поэтому оно не может разойтись само с собой.
+    Единственное место, где строится вид плеера: и колбэки `_announce`/
+    `_handle_stopped`, и каждая кнопка `PlayerView` перерисовывают сообщение
+    через эту же функцию, поэтому оно не может разойтись само с собой.
 
     Порядок в embed'е сверху вниз — author → title → большая картинка →
     footer. Обложка ставится большой картинкой (`set_image`), а Discord не
@@ -76,7 +70,17 @@ def build_player_embed(player: GuildPlayer, color: discord.Color) -> discord.Emb
     компромисс структуры embed'а, а не недосмотр.
     """
     track = player.current
-    if track is None:
+    info = None
+    if track is not None:
+        try:
+            info = player.now_playing()
+        except NothingPlayingError:
+            # Гонка: трек мог закончиться между чтением player.current и этим
+            # вызовом (кнопка читает состояние не под локом плеера). В этом
+            # случае просто показываем "остановлена", а не падаем.
+            track = None
+
+    if track is None or info is None:
         return discord.Embed(
             title="«Моя волна» остановлена",
             description="Воспроизведение завершено.",
@@ -90,7 +94,6 @@ def build_player_embed(player: GuildPlayer, color: discord.Color) -> discord.Emb
     if track.cover_url is not None:
         embed.set_image(url=track.cover_url)
 
-    info = player.now_playing()
     bar = render_progress_bar(info.elapsed, track.duration)
     footer_text = f"{track.artists} — {track.title}"
     if bar is not None:
@@ -122,13 +125,13 @@ class MusicCog(commands.Cog, name="Музыка"):
         # его правка — подробности см. в докстринге `_update_player_message`.
         self._player_message: discord.Message | discord.InteractionMessage | None = None
         self._player_message_lock = asyncio.Lock()
-        self._stop_watch_task: asyncio.Task[None] | None = None
         self._player = GuildPlayer(
             client,
             ffmpeg_path=config.ffmpeg_path,
             default_volume=config.default_volume,
             idle_timeout=config.idle_timeout,
             announce=self._announce,
+            on_stopped=self._handle_stopped,
         )
 
     @property
@@ -137,9 +140,7 @@ class MusicCog(commands.Cog, name="Музыка"):
         return self._player
 
     async def cog_unload(self) -> None:
-        """Останавливает слежку за остановкой волны и отключает плеер при выгрузке кога."""
-        if self._stop_watch_task is not None:
-            self._stop_watch_task.cancel()
+        """Корректно отключает плеер от голосового канала при выгрузке кога."""
         await self._player.disconnect()
 
     async def _announce(self, track: TrackInfo, wave_description: str | None) -> None:
@@ -149,6 +150,15 @@ class MusicCog(commands.Cog, name="Музыка"):
         берёт актуальное состояние `self._player` в момент вызова. Расхождения
         не будет — `_play_track_locked` обновляет состояние плеера ДО вызова
         этого колбэка (см. докстринг `GuildPlayer`).
+        """
+        await self._update_player_message()
+
+    async def _handle_stopped(self) -> None:
+        """Отражает остановку волны в сообщении-плеере — колбэк `GuildPlayer.on_stopped`.
+
+        Срабатывает событийно (см. `GuildPlayer._stop_locked_state`), а не по
+        опросу: `on_stopped` гарантирует однократность и молчит, если волна и
+        не запускалась, поэтому здесь достаточно просто перерисовать сообщение.
         """
         await self._update_player_message()
 
@@ -215,34 +225,6 @@ class MusicCog(commands.Cog, name="Музыка"):
             self._player_message = await self._announce_channel.send(
                 embed=embed, view=view, allowed_mentions=mentions
             )
-
-    def _restart_stop_watch(self) -> None:
-        """(Пере)запускает фоновую слежку за остановкой волны без действий пользователя.
-
-        Вызывается при каждом новом старте волны; предыдущая задача слежки
-        (если ещё жива, например от прошлой волны) отменяется, чтобы их не
-        копилось по одной на каждый /wave.
-        """
-        if self._stop_watch_task is not None and not self._stop_watch_task.done():
-            self._stop_watch_task.cancel()
-        self._stop_watch_task = asyncio.create_task(self._watch_for_stop())
-
-    async def _watch_for_stop(self) -> None:
-        """Ждёт перехода плеера в IDLE и один раз обновляет сообщение-плеер под это состояние.
-
-        Нужна для случаев без явного действия пользователя, когда волна
-        обрывается сама между треками (станция недоступна, серия битых
-        треков) — тогда `announce` не срабатывает и без этой слежки кнопки
-        сообщения-плеера остались бы "живыми" у уже мёртвого плеера.
-        """
-        try:
-            while True:
-                await asyncio.sleep(_STOP_WATCH_INTERVAL_SECONDS)
-                if self._player.state is PlayerState.IDLE:
-                    break
-            await self._update_player_message()
-        except asyncio.CancelledError:
-            pass
 
     async def handle_pause_toggle(self, interaction: discord.Interaction) -> None:
         """Переключает паузу/воспроизведение по кнопке плеера и правит сообщение на месте.
@@ -357,7 +339,6 @@ class MusicCog(commands.Cog, name="Музыка"):
         await interaction.response.defer(ephemeral=True)
         await self._ensure_connected(interaction)
         await self._player.start_wave()
-        self._restart_stop_watch()
         await self._send_started_ack(interaction)
 
     async def _start_wave_from_track(
@@ -372,7 +353,6 @@ class MusicCog(commands.Cog, name="Музыка"):
         """
         await self._ensure_connected(interaction)
         await self._player.start_wave_from_track(track)
-        self._restart_stop_watch()
         await self._send_started_ack(interaction)
 
     async def _search_and_start(self, interaction: discord.Interaction, query: str) -> None:
@@ -455,27 +435,34 @@ class MusicCog(commands.Cog, name="Музыка"):
     @app_commands.command(name="skip", description="Пропустить текущий трек")
     @app_commands.guild_only()
     async def skip(self, interaction: discord.Interaction) -> None:
-        """Пропускает текущий воспроизводимый трек."""
+        """Пропускает текущий воспроизводимый трек и синхронизирует сообщение-плеер."""
         await interaction.response.defer()
         next_track = await self._player.skip()
         if next_track is None:
             await interaction.followup.send("Трек пропущен.")
         else:
             await interaction.followup.send(f"Трек пропущен. Далее: {next_track.display}")
+        # Как и кнопка «Следующий»: `skip()` уже мог обновить сообщение-плеер
+        # сам (колбэк `_announce`/`_handle_stopped` внутри него), но этот
+        # вызов — гарантия, что оно точно не останется рассинхронизировано с
+        # тем, что команда только что сделала.
+        await self._update_player_message(interaction)
 
     @app_commands.command(name="pause", description="Поставить воспроизведение на паузу")
     @app_commands.guild_only()
     async def pause(self, interaction: discord.Interaction) -> None:
-        """Ставит текущее воспроизведение на паузу."""
+        """Ставит текущее воспроизведение на паузу и синхронизирует сообщение-плеер."""
         self._player.pause()
         await interaction.response.send_message("Воспроизведение приостановлено.")
+        await self._update_player_message(interaction)
 
     @app_commands.command(name="resume", description="Возобновить воспроизведение")
     @app_commands.guild_only()
     async def resume(self, interaction: discord.Interaction) -> None:
-        """Возобновляет воспроизведение после паузы."""
+        """Возобновляет воспроизведение после паузы и синхронизирует сообщение-плеер."""
         self._player.resume()
         await interaction.response.send_message("Воспроизведение возобновлено.")
+        await self._update_player_message(interaction)
 
     @app_commands.command(name="volume", description="Показать или установить громкость (0-200%)")
     @app_commands.describe(value="Громкость в процентах от 0 до 200")

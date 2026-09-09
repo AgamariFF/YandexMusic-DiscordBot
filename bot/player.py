@@ -61,14 +61,23 @@ class GuildPlayer:
         default_volume: float = 0.5,
         idle_timeout: int = 300,
         announce: Callable[[TrackInfo, str | None], Awaitable[None]] | None = None,
+        on_stopped: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        """Создаёт плеер сервера с заданными настройками звука и оповещений."""
+        """Создаёт плеер сервера с заданными настройками звука и оповещений.
+
+        `on_stopped` — необязательный колбэк без аргументов, симметричный
+        `announce`: срабатывает ровно один раз при каждом реальном переходе
+        волны из активного состояния в остановленное — независимо от
+        причины (кончились треки, `disconnect()` и т.д.). Подробности и
+        гарантия однократности — в докстринге `_stop_locked_state`.
+        """
         self._client = client
         self._ffmpeg_path = ffmpeg_path
         self._volume = max(0.0, min(2.0, default_volume))
         self._bass = BassLevel.OFF
         self._idle_timeout = idle_timeout
         self._announce = announce
+        self._on_stopped = on_stopped
 
         self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -154,7 +163,7 @@ class GuildPlayer:
                 # по играющему треку) до того, как `_stop_locked_state`
                 # выбросит объект вместе с его очередью.
                 await self._session.flush_pending_feedbacks()
-            self._stop_locked_state()
+            await self._stop_locked_state()
             self._consecutive_failures = 0
             if self._voice_client is not None:
                 try:
@@ -284,7 +293,7 @@ class GuildPlayer:
                 logger.error(
                     "Не удалось перезапустить трек %s с новым уровнем баса: %s", track.id, exc
                 )
-                self._stop_locked_state()
+                await self._stop_locked_state()
                 return
 
             if was_paused:
@@ -355,7 +364,7 @@ class GuildPlayer:
     async def _advance_locked(self) -> TrackInfo | None:
         """Получает и запускает следующий трек волны; при неустранимых ошибках останавливается."""
         if self._session is None:
-            self._stop_locked_state()
+            await self._stop_locked_state()
             return None
 
         while True:
@@ -363,7 +372,7 @@ class GuildPlayer:
                 track = await self._session.next_track()
             except (YandexAuthError, WaveUnavailableError):
                 logger.exception("«Моя волна» недоступна, воспроизведение остановлено")
-                self._stop_locked_state()
+                await self._stop_locked_state()
                 return None
 
             try:
@@ -381,14 +390,14 @@ class GuildPlayer:
                         "Подряд %d недоступных треков волны, воспроизведение остановлено",
                         self._consecutive_failures,
                     )
-                    self._stop_locked_state()
+                    await self._stop_locked_state()
                     return None
                 continue
             except BotError:
                 logger.exception(
                     "Не удалось запустить трек %s, воспроизведение остановлено", track.id
                 )
-                self._stop_locked_state()
+                await self._stop_locked_state()
                 return None
             else:
                 self._consecutive_failures = 0
@@ -463,7 +472,7 @@ class GuildPlayer:
         if self._voice_client.is_playing() or self._voice_client.is_paused():
             self._voice_client.stop()
 
-    def _stop_locked_state(self) -> None:
+    async def _stop_locked_state(self) -> None:
         """Сбрасывает состояние воспроизведения и волну, не трогая голосовое соединение.
 
         Этот метод выбрасывает `self._session` вместе с её очередью
@@ -484,11 +493,28 @@ class GuildPlayer:
         трека кладётся в очередь только после успешного старта
         воспроизведения (см. `_play_track_locked`). Пропуск здесь — не
         забывчивость.
+
+        После сброса вызывает `on_stopped`, если волна действительно была
+        активна (`_session` или `_current_track` были не пустыми ДО сброса).
+        Эта проверка даёт сразу два свойства колбэка: он не сработает на
+        уже остановленном плеере (все шесть вызывающих мест сбрасывают эти
+        поля именно здесь и только здесь, так что повторный вызов на пустом
+        состоянии ничего не найдёт активным) и не сработает, если волна и не
+        запускалась (`disconnect()` идемпотентен и вызывается в том числе
+        когда играть было нечему). Как и `announce`, колбэк защищён от
+        собственных ошибок — они не должны ронять остановку плеера.
         """
+        was_active = self._session is not None or self._current_track is not None
         self._current_track = None
         self._source = None
         self._session = None
         self._state = PlayerState.IDLE
+
+        if was_active and self._on_stopped is not None:
+            try:
+                await self._on_stopped()
+            except Exception:
+                logger.exception("Ошибка в колбэке остановки волны")
 
     def _channel_is_empty_locked(self) -> bool:
         """Проверяет, что в голосовом канале не осталось людей (только боты либо никого)."""
