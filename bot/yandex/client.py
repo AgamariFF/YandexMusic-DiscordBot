@@ -10,7 +10,12 @@ from typing import Any, Literal
 from yandex_music import ClientAsync, Track
 from yandex_music.exceptions import UnauthorizedError, YandexMusicError
 
-from bot.errors import TrackUnavailableError, WaveUnavailableError, YandexAuthError
+from bot.errors import (
+    SearchUnavailableError,
+    TrackUnavailableError,
+    WaveUnavailableError,
+    YandexAuthError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +215,9 @@ class YandexMusicClient:
             )
         return self._radio_session_id
 
-    async def start_session(self) -> WaveBatch:
+    async def start_session(
+        self, *, seeds: list[str] | None = None, track_to_start_from: str | None = None
+    ) -> WaveBatch:
         """Создаёт сессию сессионного rotor и возвращает первую пачку треков.
 
         Раньше мы считали, что создание сессии само по себе уже является
@@ -218,15 +225,32 @@ class YandexMusicClient:
         трафика официального приложения показал обратное: оно всё равно шлёт
         `radioStarted` отдельным запросом сразу после `session/new` (см.
         docs/rotor-session-api.md), и мы делаем так же — см. отправку ниже.
+
+        `seeds` не передан — берём `[self._station]`, то есть прежнее
+        поведение «Моей волны» от станции пользователя. Для волны от
+        конкретного трека вызывающая сторона передаёт `seeds=["track:<id
+        трека>"]` и одновременно `track_to_start_from` — это ОТДЕЛЬНОЕ поле
+        `trackToStartFrom` тела запроса, а не часть `seeds`. Его роль
+        принципиальна и неочевидна из кода: проверено вживую, что именно
+        `trackToStartFrom` заставляет запрошенный трек стать ПЕРВЫМ в выдаче
+        сессии — без него волна стартует с похожего, но другого трека.
+        Официальное приложение этого поля вообще не использует (оно
+        проигрывает выбранный трек локально, а волну запускает уже отдельно
+        от станции, см. docs/rotor-session-api.md) — не удаляйте параметр как
+        «неофициальный» или «лишний»: именно через него бот получает связку
+        «сначала сам выбранный трек, потом волна от него» одним запросом,
+        без отдельного локального воспроизведения трека вне волны.
         """
         client = self._require_client()
         url = f"{client.base_url}/rotor/session/new"
         payload: dict[str, Any] = {
-            "seeds": [self._station],
+            "seeds": seeds if seeds is not None else [self._station],
             "includeTracksInResponse": True,
             "includeWaveModel": True,
             "interactive": True,
         }
+        if track_to_start_from is not None:
+            payload["trackToStartFrom"] = track_to_start_from
         try:
             raw = await client.request.post(url, json=payload)
         except UnauthorizedError as exc:
@@ -302,6 +326,47 @@ class YandexMusicClient:
 
         return self._parse_batch(raw, client)
 
+    async def search_tracks(self, query: str, *, limit: int = 10) -> tuple[TrackInfo, ...]:
+        """Ищет треки по текстовому запросу и возвращает не больше `limit` штук.
+
+        Использует поиск библиотеки (`client.search(..., type_="track")`),
+        а не собственный запрос к rotor-API — поиск треков никак не связан с
+        сессией волны. Результаты лежат в `result.tracks.results`, но само
+        поле `tracks` у ответа опционально (сервер может не вернуть блок
+        треков вовсе, например при полностью пустой выдаче) — в этом случае
+        просто возвращаем пустой кортеж, а не падаем. Проверено вживую: поиск
+        находит треки даже при опечатках в запросе (сервер сам их исправляет,
+        см. `nocorrect` у `Search`), отдельная обработка опечаток не нужна.
+        """
+        client = self._require_client()
+        try:
+            result = await client.search(query, type_="track")
+        except UnauthorizedError as exc:
+            logger.error("Не удалось выполнить поиск треков: %s: %s", type(exc).__name__, exc)
+            raise YandexAuthError() from exc
+        except YandexMusicError as exc:
+            logger.warning("Не удалось выполнить поиск треков: %s: %s", type(exc).__name__, exc)
+            raise SearchUnavailableError() from exc
+        except OSError as exc:
+            logger.warning("Не удалось выполнить поиск треков: %s: %s", type(exc).__name__, exc)
+            raise SearchUnavailableError() from exc
+
+        if result is None or result.tracks is None:
+            logger.debug("Поиск треков не вернул результатов")
+            return ()
+
+        tracks: list[TrackInfo] = []
+        for track in result.tracks.results:
+            info = self._track_info_from_track(track)
+            if info is None:
+                continue
+            tracks.append(info)
+            if len(tracks) >= limit:
+                break
+
+        logger.info("Поиск треков завершён, найдено: %d шт.", len(tracks))
+        return tuple(tracks)
+
     async def send_feedbacks(self, feedbacks: list[dict[str, Any]]) -> None:
         """Отправляет пачку накопленных фидбеков одним запросом, без запроса треков.
 
@@ -351,6 +416,36 @@ class YandexMusicClient:
         except Exception as exc:
             self._log_feedback_failure("отправка фидбека волны", exc)
 
+    @staticmethod
+    def _track_info_from_track(track: Track | None) -> TrackInfo | None:
+        """Собирает TrackInfo из объекта Track библиотеки либо возвращает None.
+
+        Общий хелпер для `_parse_batch` (где `Track` собирается вручную из
+        сырого словаря пачки rotor через `Track.de_json`) и `search_tracks`
+        (где `Track` уже приходит готовым объектом от библиотеки) — правила
+        сборки не должны разъезжаться между этими двумя путями: пропуск
+        недоступных треков (`available is False`), склейка артистов через
+        запятую и составной `feedback_id` вида `<id трека>:<id альбома>`, как
+        шлёт официальное приложение (проверено дампом трафика: трек 38077233
+        с альбомом 4849007 уходит как "38077233:4849007"). Трек без альбомов
+        теоретически возможен — запасной вариант на голый `id` обязателен,
+        падать здесь нельзя.
+        """
+        if track is None or track.available is False:
+            return None
+        artists = ", ".join(a.name for a in track.artists) or "Неизвестный исполнитель"
+        duration = (track.duration_ms / 1000) if track.duration_ms else 0.0
+        album_id = track.albums[0].id if track.albums else None
+        feedback_id = f"{track.id}:{album_id}" if album_id is not None else str(track.id)
+        return TrackInfo(
+            id=str(track.id),
+            feedback_id=feedback_id,
+            title=track.title,
+            artists=artists,
+            duration=duration,
+            raw=track,
+        )
+
     def _parse_batch(self, raw: dict[str, Any] | None, client: ClientAsync) -> WaveBatch:
         """Разбирает ответ сессионного rotor (`session/new` или `.../tracks`) в WaveBatch.
 
@@ -375,26 +470,10 @@ class YandexMusicClient:
             if not raw_track:
                 continue
             track = Track.de_json(raw_track, client)
-            if track is None or track.available is False:
+            info = self._track_info_from_track(track)
+            if info is None:
                 continue
-            artists = ", ".join(a.name for a in track.artists) or "Неизвестный исполнитель"
-            duration = (track.duration_ms / 1000) if track.duration_ms else 0.0
-            # Составной id для фидбека — `<id трека>:<id альбома>`, как шлёт
-            # официальное приложение (проверено дампом трафика). Трек без
-            # альбомов теоретически возможен — запасной вариант обязателен,
-            # падать здесь нельзя.
-            album_id = track.albums[0].id if track.albums else None
-            feedback_id = f"{track.id}:{album_id}" if album_id is not None else str(track.id)
-            tracks.append(
-                TrackInfo(
-                    id=str(track.id),
-                    feedback_id=feedback_id,
-                    title=track.title,
-                    artists=artists,
-                    duration=duration,
-                    raw=track,
-                )
-            )
+            tracks.append(info)
 
         if tracks:
             logger.info("Получена пачка треков волны: %d шт.", len(tracks))

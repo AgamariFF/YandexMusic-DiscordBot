@@ -25,6 +25,11 @@ MAX_BUFFERED_TRACKS = 1
 # это предпочтительнее падения бота или неограниченного роста памяти.
 MAX_PENDING_FEEDBACKS = 20
 
+# Описание волны по умолчанию — «Моя волна» от станции пользователя, без
+# привязки к конкретному треку. Волна от трека получает своё описание при
+# создании (см. `GuildPlayer.start_wave_from_track`).
+DEFAULT_WAVE_DESCRIPTION = "Моя волна"
+
 
 class WaveSession:
     """Сессия «Моей волны»: буферизует треки цепочкой и копит фидбек для отправки.
@@ -49,9 +54,29 @@ class WaveSession:
     MAX_FETCH_ATTEMPTS = 4
     RETRY_DELAY_SECONDS = 1.0
 
-    def __init__(self, client: YandexMusicClient) -> None:
-        """Запоминает клиент и инициализирует пустое состояние сессии."""
+    def __init__(
+        self,
+        client: YandexMusicClient,
+        *,
+        seeds: list[str] | None = None,
+        track_to_start_from: str | None = None,
+        description: str = DEFAULT_WAVE_DESCRIPTION,
+    ) -> None:
+        """Запоминает клиент, параметры запуска волны и инициализирует пустое состояние сессии.
+
+        `seeds` и `track_to_start_from` не используются здесь напрямую — они
+        лишь запоминаются, чтобы `start()` прокинул их в
+        `client.start_session(...)`. Так волна от произвольного трека
+        (`seeds=["track:<id>"]`, `track_to_start_from=<id>`) и обычная «Моя
+        волна» (оба параметра не заданы) собираются одним и тем же классом,
+        без дублирования логики буферизации и фидбека. `description` — не
+        влияет на поведение сессии вообще, это чисто человекочитаемая
+        подпись для UI (см. свойство `description`).
+        """
         self._client = client
+        self._seeds = seeds
+        self._track_to_start_from = track_to_start_from
+        self._description = description
         self._buffer: deque[TrackInfo] = deque()
         self._pending_feedbacks: deque[dict[str, Any]] = deque(maxlen=MAX_PENDING_FEEDBACKS)
         self._batch_id: str | None = None
@@ -79,6 +104,11 @@ class WaveSession:
         """
         return self._current_batch_id if self._current_batch_id is not None else self._batch_id
 
+    @property
+    def description(self) -> str:
+        """Человекочитаемое описание волны, которую играет эта сессия («Моя волна» по умолчанию)."""
+        return self._description
+
     async def start(self) -> None:
         """Запускает (или перезапускает) сессию волны и сбрасывает буфер.
 
@@ -102,8 +132,15 @@ class WaveSession:
         лишний сетевой круг исчезает. Пачка кладётся в буфер как есть: сразу
         после `self._recent.clear()` ниже фильтровать её по `_recent` было
         бы бессмысленно — список только что опустел.
+
+        `seeds` и `track_to_start_from`, запомненные в конструкторе,
+        прокидываются в `client.start_session(...)` как есть: именно они
+        отличают волну от конкретного трека от обычной «Моей волны» (см.
+        docstring `__init__`).
         """
-        batch = await self._client.start_session()
+        batch = await self._client.start_session(
+            seeds=self._seeds, track_to_start_from=self._track_to_start_from
+        )
         self._buffer.clear()
         self._current_batch_id = None
         self._last_track = None

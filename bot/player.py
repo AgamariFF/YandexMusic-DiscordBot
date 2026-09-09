@@ -60,7 +60,7 @@ class GuildPlayer:
         ffmpeg_path: str = "ffmpeg",
         default_volume: float = 0.5,
         idle_timeout: int = 300,
-        announce: Callable[[TrackInfo], Awaitable[None]] | None = None,
+        announce: Callable[[TrackInfo, str | None], Awaitable[None]] | None = None,
     ) -> None:
         """Создаёт плеер сервера с заданными настройками звука и оповещений."""
         self._client = client
@@ -115,6 +115,11 @@ class GuildPlayer:
         """Голосовой канал, к которому подключён плеер, либо None."""
         return self._channel
 
+    @property
+    def wave_description(self) -> str | None:
+        """Человекочитаемое описание текущей волны, либо None, если волна не запущена."""
+        return self._session.description if self._session is not None else None
+
     async def connect(self, channel: discord.VoiceChannel | discord.StageChannel) -> None:
         """Подключается к каналу либо переходит в него, если уже подключён к другому."""
         self._loop = asyncio.get_running_loop()
@@ -161,6 +166,36 @@ class GuildPlayer:
 
     async def start_wave(self) -> TrackInfo:
         """Запускает «Мою волну» заново и начинает воспроизведение первого трека."""
+        return await self._start_wave_with_session(WaveSession(self._client))
+
+    async def start_wave_from_track(self, track: TrackInfo) -> TrackInfo:
+        """Запускает волну от конкретного трека: сначала сам трек, затем похожие на него.
+
+        Станция волны — `track:<id трека>` (без id альбома, здесь именно
+        `TrackInfo.id`), а `track_to_start_from=track.id` — то самое поле,
+        из-за которого сессия отдаёт запрошенный трек ПЕРВЫМ (см. docstring
+        `YandexMusicClient.start_session`). Поэтому отдельного
+        воспроизведения трека вне волны не нужно: волна с этими параметрами
+        и есть «сам трек, потом волна от него». Описание волны для UI — без
+        длительности из `track.display`, только артисты и название.
+        """
+        session = WaveSession(
+            self._client,
+            seeds=[f"track:{track.id}"],
+            track_to_start_from=track.id,
+            description=f"Моя волна по {track.artists} — {track.title}",
+        )
+        return await self._start_wave_with_session(session)
+
+    async def _start_wave_with_session(self, session: WaveSession) -> TrackInfo:
+        """Общая часть запуска волны: прерывание текущего трека, старт переданной сессии.
+
+        Вынесена из `start_wave`/`start_wave_from_track`, чтобы не дублировать
+        тонкую логику: прерывание играющего трека, досылку фидбека ещё живой
+        СТАРОЙ сессии и сброс счётчика ошибок. Принимает уже сконструированную
+        (но ещё не запущенную) `WaveSession` — обе публичные обёртки лишь по-
+        разному её конструируют.
+        """
         async with self._lock:
             if self._voice_client is None or not self._voice_client.is_connected():
                 raise NotConnectedError()
@@ -177,7 +212,6 @@ class GuildPlayer:
             if self._session is not None:
                 await self._session.flush_pending_feedbacks()
 
-            session = WaveSession(self._client)
             await session.start()
             self._session = session
             self._consecutive_failures = 0
@@ -401,7 +435,7 @@ class GuildPlayer:
 
         if notify and self._announce is not None:
             try:
-                await self._announce(track)
+                await self._announce(track, self.wave_description)
             except Exception:
                 logger.exception("Ошибка в колбэке анонса трека %s", track.id)
 

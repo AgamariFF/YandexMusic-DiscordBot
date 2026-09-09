@@ -61,6 +61,12 @@ class TrackUnavailableError(BotError):
     default_message = "Трек недоступен для воспроизведения."
 
 
+class SearchUnavailableError(BotError):
+    """Поиск треков в Яндекс.Музыке недоступен или завершился ошибкой."""
+
+    default_message = "Поиск треков сейчас недоступен. Попробуйте позже."
+
+
 class NothingPlayingError(BotError):
     """Команда требует активного воспроизведения, но сейчас ничего не играет."""
 
