@@ -34,9 +34,11 @@ class FakeMusicClient:
         self.batches_to_return = []
         self.batch_index = 0
 
-    async def start_session(self) -> WaveBatch:
+    async def start_session(
+        self, *, seeds: list[str] | None = None, track_to_start_from: str | None = None
+    ) -> WaveBatch:
         """Start session and return first batch."""
-        self.calls.append(("start_session",))
+        self.calls.append(("start_session", seeds, track_to_start_from))
         if self.batch_index < len(self.batches_to_return):
             batch = self.batches_to_return[self.batch_index]
             self.batch_index += 1
@@ -461,3 +463,174 @@ class TestPlaybackCallbackIdentity:
         assert player._current_track is current_track
         # - current source should remain unchanged
         assert player._source is current_source
+
+
+class TestGuildPlayerStartWaveFromTrack:
+    """Тесты для start_wave_from_track()."""
+
+    @pytest.mark.asyncio
+    async def test_start_wave_from_track_creates_session_with_track_seed(self):
+        """start_wave_from_track() создаёт сессию со станцией track:<track_id>."""
+        # Используем ID и feedback_id которые явно отличаются
+        track = TrackInfo(
+            id="track123",
+            feedback_id="track123:album456",
+            title="Test Song",
+            artists="Test Artist",
+            duration=180.0,
+            raw=None,
+        )
+
+        fake_client = FakeMusicClient()
+        fake_client.batches_to_return = [
+            WaveBatch(batch_id="batch1", tracks=(track,))
+        ]
+
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = False
+
+        player = GuildPlayer(
+            fake_client,
+            ffmpeg_path="ffmpeg",
+            default_volume=0.5,
+        )
+        player._voice_client = voice_client
+        player._channel = MagicMock()
+
+        await player.start_wave_from_track(track)
+
+        # Проверяем что была создана сессия с правильными параметрами
+        start_session_calls = [
+            c for c in fake_client.calls if c[0] == "start_session"
+        ]
+        assert len(start_session_calls) > 0, "start_session должен быть вызван"
+
+        seeds = start_session_calls[-1][1]
+        assert seeds == [f"track:{track.id}"], (
+            f"Seeds должны быть ['track:track123'], получено {seeds}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_wave_from_track_passes_track_to_start_from(self):
+        """start_wave_from_track() передаёт track_to_start_from=track.id."""
+        track = TrackInfo(
+            id="track123",
+            feedback_id="track123:album456",
+            title="Test Song",
+            artists="Test Artist",
+            duration=180.0,
+            raw=None,
+        )
+
+        fake_client = FakeMusicClient()
+        fake_client.batches_to_return = [
+            WaveBatch(batch_id="batch1", tracks=(track,))
+        ]
+
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = False
+
+        player = GuildPlayer(
+            fake_client,
+            ffmpeg_path="ffmpeg",
+            default_volume=0.5,
+        )
+        player._voice_client = voice_client
+        player._channel = MagicMock()
+
+        await player.start_wave_from_track(track)
+
+        start_session_calls = [
+            c for c in fake_client.calls if c[0] == "start_session"
+        ]
+        track_to_start_from = start_session_calls[-1][2]
+        assert track_to_start_from == track.id, (
+            f"track_to_start_from должен быть '{track.id}', получено {track_to_start_from}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_wave_from_track_sets_description_with_artists_and_title(self):
+        """start_wave_from_track() устанавливает описание с артистами и названием трека."""
+        track = TrackInfo(
+            id="track123",
+            feedback_id="track123:album456",
+            title="Test Song",
+            artists="The Beatles & Pink Floyd",
+            duration=180.0,
+            raw=None,
+        )
+
+        fake_client = FakeMusicClient()
+        fake_client.batches_to_return = [
+            WaveBatch(batch_id="batch1", tracks=(track,))
+        ]
+
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = False
+
+        player = GuildPlayer(
+            fake_client,
+            ffmpeg_path="ffmpeg",
+            default_volume=0.5,
+        )
+        player._voice_client = voice_client
+        player._channel = MagicMock()
+
+        await player.start_wave_from_track(track)
+
+        expected_description = f"Моя волна по {track.artists} — {track.title}"
+        assert player.wave_description == expected_description, (
+            f"Описание должно быть '{expected_description}', получено {player.wave_description}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_wave_description_returns_none_when_not_started(self):
+        """wave_description возвращает None когда волна не запущена."""
+        fake_client = FakeMusicClient()
+
+        player = GuildPlayer(
+            fake_client,
+            ffmpeg_path="ffmpeg",
+            default_volume=0.5,
+        )
+
+        assert player.wave_description is None
+
+    @pytest.mark.asyncio
+    async def test_wave_description_returns_current_description(self):
+        """wave_description возвращает описание текущей волны."""
+        track = TrackInfo(
+            id="track1",
+            feedback_id="track1:album1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            raw=None,
+        )
+
+        fake_client = FakeMusicClient()
+        fake_client.batches_to_return = [
+            WaveBatch(batch_id="batch1", tracks=(track,))
+        ]
+
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = False
+
+        player = GuildPlayer(
+            fake_client,
+            ffmpeg_path="ffmpeg",
+            default_volume=0.5,
+        )
+        player._voice_client = voice_client
+        player._channel = MagicMock()
+
+        await player.start_wave_from_track(track)
+
+        description = player.wave_description
+        assert description is not None
+        assert "Artist" in description
+        assert "Song" in description

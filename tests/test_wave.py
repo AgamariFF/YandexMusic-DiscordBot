@@ -21,9 +21,11 @@ class FakeMusicClient:
         self.batch_index = 0
         self.fetch_handler = None
 
-    async def start_session(self) -> WaveBatch:
+    async def start_session(
+        self, *, seeds: list[str] | None = None, track_to_start_from: str | None = None
+    ) -> WaveBatch:
         """Создаёт сессию и возвращает первую пачку треков."""
-        self.calls.append(("start_session",))
+        self.calls.append(("start_session", seeds, track_to_start_from))
         if self.batch_index < len(self.batches_to_return):
             batch = self.batches_to_return[self.batch_index]
             self.batch_index += 1
@@ -1227,3 +1229,67 @@ class TestWaveSessionFeedbackContent:
         ]
         assert len(feedbacks_with_skip) > 0
         assert feedbacks_with_skip[0]["event"]["trackId"] == "555:666"
+
+
+class TestWaveSessionDescription:
+    """Тесты для параметра description и свойства description."""
+
+    def test_default_description_is_default_wave_description(self):
+        """WaveSession по умолчанию получает DEFAULT_WAVE_DESCRIPTION."""
+        from bot.yandex.wave import DEFAULT_WAVE_DESCRIPTION
+
+        client = FakeMusicClient()
+        session = WaveSession(client)
+        assert session.description == DEFAULT_WAVE_DESCRIPTION
+
+    def test_custom_description_passed_to_constructor(self):
+        """WaveSession сохраняет custom описание из конструктора."""
+        client = FakeMusicClient()
+        custom_desc = "Моя волна по The Beatles"
+        session = WaveSession(client, description=custom_desc)
+        assert session.description == custom_desc
+
+    @pytest.mark.asyncio
+    async def test_seeds_and_track_to_start_from_passed_to_start_session(self):
+        """WaveSession передаёт seeds и track_to_start_from в client.start_session()."""
+        batch = WaveBatch(batch_id="batch1", tracks=(make_track("1"),))
+        client = FakeMusicClient()
+        client.batches_to_return = [batch]
+
+        session = WaveSession(
+            client, seeds=["track:123"], track_to_start_from="123"
+        )
+        await session.start()
+
+        # Проверяем что вызов был с правильными параметрами
+        start_session_call = [c for c in client.calls if c[0] == "start_session"][0]
+        assert start_session_call[1] == ["track:123"]  # seeds
+        assert start_session_call[2] == "123"  # track_to_start_from
+
+    @pytest.mark.asyncio
+    async def test_seeds_none_track_to_start_from_none_passed_correctly(self):
+        """WaveSession передаёт None когда параметры не указаны."""
+        batch = WaveBatch(batch_id="batch1", tracks=(make_track("1"),))
+        client = FakeMusicClient()
+        client.batches_to_return = [batch]
+
+        session = WaveSession(client)
+        await session.start()
+
+        start_session_call = [c for c in client.calls if c[0] == "start_session"][0]
+        assert start_session_call[1] is None  # seeds
+        assert start_session_call[2] is None  # track_to_start_from
+
+    @pytest.mark.asyncio
+    async def test_only_seeds_passed_to_start_session(self):
+        """WaveSession передаёт seeds=X, track_to_start_from=None."""
+        batch = WaveBatch(batch_id="batch1", tracks=(make_track("1"),))
+        client = FakeMusicClient()
+        client.batches_to_return = [batch]
+
+        session = WaveSession(client, seeds=["station:my_wave"])
+        await session.start()
+
+        start_session_call = [c for c in client.calls if c[0] == "start_session"][0]
+        assert start_session_call[1] == ["station:my_wave"]
+        assert start_session_call[2] is None

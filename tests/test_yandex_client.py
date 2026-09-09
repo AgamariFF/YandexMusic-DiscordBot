@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yandex_music.exceptions
 
-from bot.errors import TrackUnavailableError, WaveUnavailableError, YandexAuthError
+from bot.errors import (
+    SearchUnavailableError,
+    TrackUnavailableError,
+    WaveUnavailableError,
+    YandexAuthError,
+)
 from bot.yandex.client import (
     WAVE_STATION_ID,
     TrackInfo,
@@ -923,3 +928,206 @@ class TestFeedbackIdWithoutAlbum:
             f"С альбомом feedback_id должен быть '999:888', получено "
             f"{batch.tracks[0].feedback_id}"
         )
+
+
+class TestYandexMusicClientSearchTracks:
+    """Тесты для search_tracks()."""
+
+    @pytest.mark.asyncio
+    async def test_search_tracks_returns_tuple_of_track_info(self):
+        """search_tracks() возвращает кортеж TrackInfo."""
+        track1 = SimpleNamespace(
+            id="track1",
+            title="Song 1",
+            artists=[SimpleNamespace(name="Artist A")],
+            duration_ms=180000,
+            available=True,
+            albums=[SimpleNamespace(id="album1")],
+        )
+        track2 = SimpleNamespace(
+            id="track2",
+            title="Song 2",
+            artists=[SimpleNamespace(name="Artist B")],
+            duration_ms=240000,
+            available=True,
+            albums=[SimpleNamespace(id="album2")],
+        )
+
+        search_result = SimpleNamespace(
+            tracks=SimpleNamespace(results=[track1, track2])
+        )
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(return_value=search_result)
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        with patch("bot.yandex.client.Track.de_json", side_effect=[track1, track2]):
+            result = await client.search_tracks("test query")
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert all(isinstance(t, TrackInfo) for t in result)
+        assert result[0].id == "track1"
+        assert result[1].id == "track2"
+
+    @pytest.mark.asyncio
+    async def test_search_tracks_respects_limit(self):
+        """search_tracks() возвращает не больше limit треков."""
+        tracks = [
+            SimpleNamespace(
+                id=f"track{i}",
+                title=f"Song {i}",
+                artists=[SimpleNamespace(name="Artist")],
+                duration_ms=180000,
+                available=True,
+                albums=[SimpleNamespace(id=f"album{i}")],
+            )
+            for i in range(5)
+        ]
+
+        search_result = SimpleNamespace(tracks=SimpleNamespace(results=tracks))
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(return_value=search_result)
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        with patch("bot.yandex.client.Track.de_json", side_effect=tracks):
+            result = await client.search_tracks("test query", limit=3)
+
+        assert len(result) == 3
+        assert result[0].id == "track0"
+        assert result[2].id == "track2"
+
+    @pytest.mark.asyncio
+    async def test_search_tracks_skips_unavailable_tracks(self):
+        """search_tracks() пропускает недоступные треки (available=False)."""
+        available_track = SimpleNamespace(
+            id="track1",
+            title="Available",
+            artists=[SimpleNamespace(name="Artist")],
+            duration_ms=180000,
+            available=True,
+            albums=[SimpleNamespace(id="album1")],
+        )
+        unavailable_track = SimpleNamespace(
+            id="track2",
+            title="Unavailable",
+            artists=[SimpleNamespace(name="Artist")],
+            duration_ms=180000,
+            available=False,
+            albums=[SimpleNamespace(id="album2")],
+        )
+
+        search_result = SimpleNamespace(
+            tracks=SimpleNamespace(results=[available_track, unavailable_track])
+        )
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(return_value=search_result)
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        with patch(
+            "bot.yandex.client.Track.de_json",
+            side_effect=[available_track, unavailable_track],
+        ):
+            result = await client.search_tracks("test query")
+
+        assert len(result) == 1
+        assert result[0].id == "track1"
+
+    @pytest.mark.asyncio
+    async def test_search_tracks_empty_result_returns_empty_tuple(self):
+        """search_tracks() с пустой выдачей возвращает пустой кортеж."""
+        search_result = SimpleNamespace(tracks=None)
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(return_value=search_result)
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        result = await client.search_tracks("nonexistent")
+
+        assert result == ()
+        assert isinstance(result, tuple)
+
+    @pytest.mark.asyncio
+    async def test_search_tracks_empty_tracks_list_returns_empty_tuple(self):
+        """search_tracks() с пустым списком результатов возвращает пустой кортеж."""
+        search_result = SimpleNamespace(tracks=SimpleNamespace(results=[]))
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(return_value=search_result)
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        result = await client.search_tracks("nonexistent")
+
+        assert result == ()
+
+    @pytest.mark.asyncio
+    async def test_search_tracks_constructs_composite_feedback_id(self):
+        """search_tracks() собирает feedback_id как <track_id>:<album_id>."""
+        track = SimpleNamespace(
+            id="track123",
+            title="Song",
+            artists=[SimpleNamespace(name="Artist")],
+            duration_ms=180000,
+            available=True,
+            albums=[SimpleNamespace(id="album456")],
+        )
+
+        search_result = SimpleNamespace(tracks=SimpleNamespace(results=[track]))
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(return_value=search_result)
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        with patch("bot.yandex.client.Track.de_json", return_value=track):
+            result = await client.search_tracks("test")
+
+        assert len(result) == 1
+        assert result[0].feedback_id == "track123:album456"
+
+    @pytest.mark.asyncio
+    async def test_search_tracks_unauthorized_error_raises_auth_error(self):
+        """search_tracks() с UnauthorizedError выбрасывает YandexAuthError."""
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(
+            side_effect=yandex_music.exceptions.UnauthorizedError("token expired")
+        )
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        with pytest.raises(YandexAuthError):
+            await client.search_tracks("test")
+
+    @pytest.mark.asyncio
+    async def test_search_tracks_yandex_music_error_raises_search_unavailable(self):
+        """search_tracks() с YandexMusicError выбрасывает SearchUnavailableError."""
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(
+            side_effect=yandex_music.exceptions.YandexMusicError("server error")
+        )
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        with pytest.raises(SearchUnavailableError):
+            await client.search_tracks("test")
+
+    @pytest.mark.asyncio
+    async def test_search_tracks_os_error_raises_search_unavailable(self):
+        """search_tracks() с OSError выбрасывает SearchUnavailableError."""
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(side_effect=OSError("connection error"))
+
+        client = YandexMusicClient("token123")
+        set_mock_client(client, mock_client)
+
+        with pytest.raises(SearchUnavailableError):
+            await client.search_tracks("test")

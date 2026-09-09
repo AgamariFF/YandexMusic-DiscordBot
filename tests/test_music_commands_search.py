@@ -1,0 +1,224 @@
+"""Tests for /search command and TrackSearchView."""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import discord
+import discord.ext.commands
+import pytest
+
+from bot.cogs.views import TrackSearchView, TrackSelect, _truncate
+from bot.config import Config
+from bot.yandex.client import TrackInfo
+
+
+@pytest.fixture
+def mock_config_search():
+    """Create a mock Config for search tests."""
+    config = MagicMock(spec=Config)
+    config.ffmpeg_path = "ffmpeg"
+    config.default_volume = 0.5
+    config.idle_timeout = 300
+    config.guild_id = 12345
+    return config
+
+
+@pytest.fixture
+def mock_client_search():
+    """Create a mock YandexMusicClient for search tests."""
+    return AsyncMock()
+
+
+@pytest.fixture
+def mock_bot_search():
+    """Create a mock discord.Bot for search tests."""
+    return MagicMock(spec=discord.ext.commands.Bot)
+
+
+@pytest.fixture
+def mock_player_search():
+    """Create a mock GuildPlayer for search tests."""
+    player = AsyncMock()
+    player.voice_client = None
+    player.connect = AsyncMock()
+    return player
+
+
+@pytest.fixture
+def cog_with_search(mock_bot_search, mock_config_search, mock_client_search, mock_player_search):
+    """Create MusicCog with mocked GuildPlayer for search tests."""
+    from bot.cogs.music import MusicCog
+
+    with patch("bot.cogs.music.GuildPlayer", return_value=mock_player_search):
+        cog = MusicCog(mock_bot_search, mock_config_search, mock_client_search)
+    return cog, mock_client_search, mock_player_search
+
+
+class TestMusicCogSearchCommand:
+    """Тесты для команды /search: логика трёх веток (пусто/один/несколько)."""
+
+    @pytest.mark.asyncio
+    async def test_search_empty_result_sends_text_message(self, cog_with_search):
+        """search с пустым результатом отправляет текстовое сообщение."""
+        cog, mock_client, mock_player = cog_with_search
+        mock_client.search_tracks = AsyncMock(return_value=())
+
+        interaction = AsyncMock(spec=discord.Interaction)
+        interaction.response = AsyncMock()
+        interaction.followup = AsyncMock()
+        interaction.followup.send = AsyncMock()
+
+        await cog.search.callback(cog, interaction, "nonexistent query")
+
+        interaction.response.defer.assert_called_once()
+        interaction.followup.send.assert_called_once()
+        call_args = interaction.followup.send.call_args
+        assert "Ничего не найдено" in call_args[0][0]
+
+
+class TestTrackSearchViewInteractionCheck:
+    """Тесты для TrackSearchView.interaction_check()."""
+
+    @pytest.mark.asyncio
+    async def test_interaction_check_allows_author(self):
+        """interaction_check разрешает автору команды."""
+        track = TrackInfo(
+            id="track1",
+            feedback_id="track1:album1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            raw=None,
+        )
+        on_select = AsyncMock()
+        view = TrackSearchView(tracks=(track,), author_id=12345, on_select=on_select)
+
+        interaction = MagicMock()
+        interaction.user = MagicMock()
+        interaction.user.id = 12345
+        result = await view.interaction_check(interaction)
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_interaction_check_denies_non_author(self):
+        """interaction_check запрещает не автору команды."""
+        track = TrackInfo(
+            id="track1",
+            feedback_id="track1:album1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            raw=None,
+        )
+        on_select = AsyncMock()
+        view = TrackSearchView(tracks=(track,), author_id=12345, on_select=on_select)
+
+        interaction = AsyncMock()
+        interaction.user = MagicMock()
+        interaction.user.id = 99999
+        interaction.response = AsyncMock()
+        interaction.response.send_message = AsyncMock()
+
+        result = await view.interaction_check(interaction)
+
+        assert result is False
+        interaction.response.send_message.assert_called_once()
+        call_args = interaction.response.send_message.call_args
+        assert call_args[1]["ephemeral"] is True
+
+
+class TestTrackSearchViewSelection:
+    """Тесты для выбора трека в TrackSearchView."""
+
+    @pytest.mark.asyncio
+    async def test_handle_selection_calls_on_select(self):
+        """handle_selection вызывает on_select с правильным треком."""
+        track = TrackInfo(
+            id="track1",
+            feedback_id="track1:album1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            raw=None,
+        )
+        on_select = AsyncMock()
+        view = TrackSearchView(tracks=(track,), author_id=12345, on_select=on_select)
+
+        interaction = AsyncMock()
+        interaction.response = AsyncMock()
+        interaction.response.edit_message = AsyncMock()
+
+        await view.handle_selection(interaction, track)
+
+        on_select.assert_called_once()
+        call_args = on_select.call_args
+        assert call_args[0][1] == track
+
+
+class TestTrackSelectTruncation:
+    """Тесты для обрезки длинных названий в TrackSelect."""
+
+    def test_track_select_truncates_long_label(self):
+        """TrackSelect обрезает длинное название до 100 символов."""
+        long_artist = "A" * 60
+        long_title = "B" * 60
+        track = TrackInfo(
+            id="track1",
+            feedback_id="track1:album1",
+            title=long_title,
+            artists=long_artist,
+            duration=180.0,
+            raw=None,
+        )
+
+        select = TrackSelect((track,))
+        option = select.options[0]
+
+        assert len(option.label) <= 100
+        full_text = f"{long_artist} — {long_title}"
+        if len(full_text) > 100:
+            assert option.label.endswith("…")
+
+    def test_truncate_function_respects_limit(self):
+        """_truncate функция обрезает текст до лимита с многоточием."""
+        long_text = "A" * 150
+        result = _truncate(long_text, limit=100)
+
+        assert len(result) <= 100
+        assert result.endswith("…")
+
+    def test_truncate_function_preserves_short_text(self):
+        """_truncate функция не изменяет короткий текст."""
+        short_text = "Hello"
+        result = _truncate(short_text, limit=100)
+
+        assert result == short_text
+
+
+class TestTrackSearchViewTimeout:
+    """Тесты для таймаута TrackSearchView."""
+
+    @pytest.mark.asyncio
+    async def test_on_timeout_disables_items(self):
+        """on_timeout отключает компоненты меню."""
+        track = TrackInfo(
+            id="track1",
+            feedback_id="track1:album1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            raw=None,
+        )
+        on_select = AsyncMock()
+        view = TrackSearchView(tracks=(track,), author_id=12345, on_select=on_select)
+
+        message = MagicMock()
+        message.edit = AsyncMock()
+        view.attach_message(message)
+
+        await view.on_timeout()
+
+        for item in view.children:
+            if hasattr(item, "disabled"):
+                assert item.disabled is True
+        message.edit.assert_called_once()
