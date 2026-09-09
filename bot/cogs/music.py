@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -9,10 +10,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.audio.bassboost import BassLevel
+from bot.cogs.player_view import PlayerView
 from bot.cogs.views import MAX_SEARCH_RESULTS, TrackSearchView, build_search_embed
 from bot.config import Config
 from bot.errors import BotError, NotInVoiceChannelError
-from bot.player import GuildPlayer
+from bot.player import GuildPlayer, PlayerState
 from bot.yandex import TrackInfo, YandexMusicClient
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,17 @@ logger = logging.getLogger(__name__)
 EMBED_COLOR = discord.Color.gold()
 
 _BASS_CHOICES = [app_commands.Choice(name=level.label, value=level.value) for level in BassLevel]
+
+#: Ширина полосы прогресса в символах (без учёта текста времени рядом).
+_PROGRESS_BAR_WIDTH = 10
+_PROGRESS_BAR_FILLED = "▰"
+_PROGRESS_BAR_EMPTY = "▱"
+#: Интервал опроса состояния плеера фоновой задачей `_watch_for_stop`. GuildPlayer
+#: не даёт колбэка на остановку волны (только `announce` на старт трека), поэтому
+#: единственный способ вовремя погасить кнопки сообщения-плеера — периодически
+#: проверять `player.state`. Секунды задержки в этом некритичны, а более частый
+#: опрос лишь без нужды нагружал бы Discord API.
+_STOP_WATCH_INTERVAL_SECONDS = 2.0
 
 
 def format_duration(seconds: float) -> str:
@@ -30,6 +43,60 @@ def format_duration(seconds: float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def render_progress_bar(elapsed: float, duration: float) -> str | None:
+    """Строит текстовую полосу прогресса вида «▰▰▰▰▱▱▱▱▱▱ 1:23 / 3:55».
+
+    Возвращает `None`, если длительность неизвестна или нулевая (бывает у
+    отдельных треков волны) — рисовать полосу тогда нечем, вызывающий код
+    должен в этом случае показать только название трека.
+    """
+    if duration <= 0:
+        return None
+    clamped_elapsed = max(0.0, min(elapsed, duration))
+    filled = round(_PROGRESS_BAR_WIDTH * clamped_elapsed / duration)
+    filled = max(0, min(_PROGRESS_BAR_WIDTH, filled))
+    bar = _PROGRESS_BAR_FILLED * filled + _PROGRESS_BAR_EMPTY * (_PROGRESS_BAR_WIDTH - filled)
+    return f"{bar} {format_duration(clamped_elapsed)} / {format_duration(duration)}"
+
+
+def build_player_embed(player: GuildPlayer, color: discord.Color) -> discord.Embed:
+    """Собирает embed единственного сообщения-плеера по текущему состоянию `GuildPlayer`.
+
+    Единственное место, где строится вид плеера: и колбэк `_announce`, и
+    каждая кнопка `PlayerView` перерисовывают сообщение через эту же функцию,
+    поэтому оно не может разойтись само с собой.
+
+    Порядок в embed'е сверху вниз — author → title → большая картинка →
+    footer. Обложка ставится большой картинкой (`set_image`), а Discord не
+    даёт разместить произвольный текст НИЖЕ такой картинки — только footer.
+    Раз по ТЗ именно там (под обложкой) должны быть исполнитель, название и
+    прогресс, footer — единственное подходящее место; это осознанный
+    компромисс структуры embed'а, а не недосмотр.
+    """
+    track = player.current
+    if track is None:
+        return discord.Embed(
+            title="«Моя волна» остановлена",
+            description="Воспроизведение завершено.",
+            color=color,
+        )
+
+    paused = player.state is PlayerState.PAUSED
+    embed = discord.Embed(title=player.wave_description or "Моя волна", color=color)
+    embed.set_author(name="На паузе" if paused else "Сейчас играет")
+
+    if track.cover_url is not None:
+        embed.set_image(url=track.cover_url)
+
+    info = player.now_playing()
+    bar = render_progress_bar(info.elapsed, track.duration)
+    footer_text = f"{track.artists} — {track.title}"
+    if bar is not None:
+        footer_text = f"{footer_text}\n{bar}"
+    embed.set_footer(text=footer_text)
+    return embed
 
 
 def _voice_channel_of(
@@ -51,6 +118,11 @@ class MusicCog(commands.Cog, name="Музыка"):
         self._config = config
         self._client = client
         self._announce_channel: discord.abc.Messageable | None = None
+        # Единственное сообщение-плеер сервера и лок, под которым идёт любая
+        # его правка — подробности см. в докстринге `_update_player_message`.
+        self._player_message: discord.Message | discord.InteractionMessage | None = None
+        self._player_message_lock = asyncio.Lock()
+        self._stop_watch_task: asyncio.Task[None] | None = None
         self._player = GuildPlayer(
             client,
             ffmpeg_path=config.ffmpeg_path,
@@ -65,21 +137,150 @@ class MusicCog(commands.Cog, name="Музыка"):
         return self._player
 
     async def cog_unload(self) -> None:
-        """Корректно отключает плеер от голосового канала при выгрузке кога."""
+        """Останавливает слежку за остановкой волны и отключает плеер при выгрузке кога."""
+        if self._stop_watch_task is not None:
+            self._stop_watch_task.cancel()
         await self._player.disconnect()
 
     async def _announce(self, track: TrackInfo, wave_description: str | None) -> None:
-        """Отправляет анонс нового трека в последний канал запуска волны, если он известен.
+        """Отражает старт нового трека в сообщении-плеере.
 
-        `wave_description` — это `GuildPlayer.wave_description` на момент старта
-        трека; он может быть `None`, если колбэк почему-то сработал раньше
-        создания сессии волны (штатно такого не бывает, но падать здесь нельзя).
+        `track` и `wave_description` не читаются напрямую: `_update_player_message`
+        берёт актуальное состояние `self._player` в момент вызова. Расхождения
+        не будет — `_play_track_locked` обновляет состояние плеера ДО вызова
+        этого колбэка (см. докстринг `GuildPlayer`).
         """
-        if self._announce_channel is None:
-            return
-        embed = discord.Embed(title="Сейчас играет", description=track.display, color=EMBED_COLOR)
-        embed.add_field(name="Волна", value=wave_description or "—", inline=False)
-        await self._announce_channel.send(embed=embed)
+        await self._update_player_message()
+
+    async def _update_player_message(self, interaction: discord.Interaction | None = None) -> None:
+        """Обновляет сообщение-плеер на месте, либо отправляет новое, если старого не осталось.
+
+        Единственная точка правки сообщения-плеера: сюда идут и колбэк
+        `_announce` (фоновая задача плеера), и все кнопки `PlayerView` —
+        оба источника могут сработать почти одновременно (например,
+        автопереход на следующий трек и нажатие «Следующий»), поэтому вся
+        работа с `self._player_message` идёт под одним `_player_message_lock`.
+        Без него конкурентные правки могли бы примениться в непредсказуемом
+        порядке и оставить в сообщении устаревший трек.
+
+        Если передан `interaction` с ещё не использованным `response` —
+        используется `edit_message`, тот самый механизм правки "на месте" по
+        нажатию кнопки. Если сообщение, к которому эта кнопка была
+        прикреплена, успели удалить вручную, `edit_message` упадёт
+        `discord.NotFound` — в этом случае, как и когда сохранённого
+        сообщения ещё/уже нет, отправляется новое и запоминается.
+        """
+        async with self._player_message_lock:
+            embed = build_player_embed(self._player, EMBED_COLOR)
+            view = PlayerView(player=self._player, controller=self)
+            mentions = discord.AllowedMentions.none()
+
+            if interaction is not None and not interaction.response.is_done():
+                try:
+                    await interaction.response.edit_message(
+                        embed=embed, view=view, allowed_mentions=mentions
+                    )
+                    return
+                except discord.NotFound:
+                    # Сообщение с кнопкой удалили вручную; response ещё не
+                    # израсходован (edit_message не дошёл до сети) — упадём в
+                    # отправку нового ниже, ответив тем же взаимодействием.
+                    pass
+
+            if (interaction is None or interaction.response.is_done()) and (
+                self._player_message is not None
+            ):
+                try:
+                    await self._player_message.edit(
+                        embed=embed, view=view, allowed_mentions=mentions
+                    )
+                    return
+                except discord.NotFound:
+                    self._player_message = None
+
+            if interaction is not None:
+                if interaction.response.is_done():
+                    self._player_message = await interaction.followup.send(
+                        embed=embed, view=view, allowed_mentions=mentions, wait=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        embed=embed, view=view, allowed_mentions=mentions
+                    )
+                    self._player_message = await interaction.original_response()
+                return
+
+            if self._announce_channel is None:
+                return
+            self._player_message = await self._announce_channel.send(
+                embed=embed, view=view, allowed_mentions=mentions
+            )
+
+    def _restart_stop_watch(self) -> None:
+        """(Пере)запускает фоновую слежку за остановкой волны без действий пользователя.
+
+        Вызывается при каждом новом старте волны; предыдущая задача слежки
+        (если ещё жива, например от прошлой волны) отменяется, чтобы их не
+        копилось по одной на каждый /wave.
+        """
+        if self._stop_watch_task is not None and not self._stop_watch_task.done():
+            self._stop_watch_task.cancel()
+        self._stop_watch_task = asyncio.create_task(self._watch_for_stop())
+
+    async def _watch_for_stop(self) -> None:
+        """Ждёт перехода плеера в IDLE и один раз обновляет сообщение-плеер под это состояние.
+
+        Нужна для случаев без явного действия пользователя, когда волна
+        обрывается сама между треками (станция недоступна, серия битых
+        треков) — тогда `announce` не срабатывает и без этой слежки кнопки
+        сообщения-плеера остались бы "живыми" у уже мёртвого плеера.
+        """
+        try:
+            while True:
+                await asyncio.sleep(_STOP_WATCH_INTERVAL_SECONDS)
+                if self._player.state is PlayerState.IDLE:
+                    break
+            await self._update_player_message()
+        except asyncio.CancelledError:
+            pass
+
+    async def handle_pause_toggle(self, interaction: discord.Interaction) -> None:
+        """Переключает паузу/воспроизведение по кнопке плеера и правит сообщение на месте.
+
+        `pause`/`resume` синхронны и не ходят в сеть, поэтому вместо
+        `defer()` сразу используется `edit_message` через
+        `_update_player_message` — ответ на нажатие и есть обновлённое
+        сообщение.
+        """
+        if self._player.state is PlayerState.PAUSED:
+            self._player.resume()
+        else:
+            self._player.pause()
+        await self._update_player_message(interaction)
+
+    async def handle_skip(self, interaction: discord.Interaction) -> None:
+        """Пропускает трек по кнопке плеера.
+
+        `skip()` резолвит следующий трек в сети и может занять больше трёх
+        секунд, поэтому сначала откладываем ответ. Сообщение поправит либо
+        колбэк `_announce` нового трека (он срабатывает прямо внутри
+        `skip()`), либо явный вызов ниже — если волна на этом закончилась и
+        анонса не будет.
+        """
+        await interaction.response.defer()
+        await self._player.skip()
+        await self._update_player_message(interaction)
+
+    async def handle_disconnect(self, interaction: discord.Interaction) -> None:
+        """Отключает плеер по кнопке — сообщение перейдёт в состояние "завершено"."""
+        await interaction.response.defer()
+        await self._player.disconnect()
+        await self._update_player_message(interaction)
+
+    async def handle_search_query(self, interaction: discord.Interaction, query: str) -> None:
+        """Обрабатывает запрос из модального окна поиска — та же ветка, что и у /search."""
+        await interaction.response.defer(thinking=True)
+        await self._search_and_start(interaction, query)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Разрешает команды кога только на сконфигурированном сервере Discord."""
@@ -134,41 +335,85 @@ class MusicCog(commands.Cog, name="Музыка"):
             await self._player.connect(channel)
         self._announce_channel = interaction.channel
 
-    async def _send_wave_started(self, interaction: discord.Interaction, track: TrackInfo) -> None:
-        """Отправляет единый embed запуска волны — общий для команд и меню выбора трека.
+    async def _send_started_ack(self, interaction: discord.Interaction) -> None:
+        """Короткое эфемерное подтверждение запуска волны.
 
-        Поле "Волна" берётся из `GuildPlayer.wave_description` уже ПОСЛЕ
-        старта сессии, поэтому для волны от трека в нём видно, от какого
-        именно трека она построена, а не просто общий заголовок — иначе
-        пользователь, выбравший трек из меню поиска, не увидел бы в ответе
-        никакого следа своего выбора.
+        Раньше команды слали публичный embed «Моя волна запущена» отдельным
+        сообщением на каждый запуск, а `_announce` — ещё один embed на
+        каждый трек: получался спам параллельно с сообщением-плеером. Теперь
+        сам плеер — единственное публичное сообщение (его к этому моменту
+        уже обновил колбэк `_announce`), а на взаимодействие всё равно нужно
+        ответить, иначе Discord покажет пользователю ошибку, — поэтому здесь
+        только короткое эфемерное "ок".
         """
-        embed = discord.Embed(
-            title="«Моя волна» запущена", description=track.display, color=EMBED_COLOR
-        )
-        embed.add_field(name="Волна", value=self._player.wave_description or "—", inline=False)
-        await interaction.followup.send(embed=embed)
+        text = "«Моя волна» запущена — смотрите сообщение-плеер в канале."
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=True)
+        else:
+            await interaction.response.send_message(text, ephemeral=True)
 
     async def _start_wave(self, interaction: discord.Interaction) -> None:
         """Запускает «Мою волну», при необходимости подключаясь к каналу пользователя."""
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         await self._ensure_connected(interaction)
-        track = await self._player.start_wave()
-        await self._send_wave_started(interaction, track)
+        await self._player.start_wave()
+        self._restart_stop_watch()
+        await self._send_started_ack(interaction)
 
     async def _start_wave_from_track(
         self, interaction: discord.Interaction, track: TrackInfo
     ) -> None:
-        """Запускает волну от выбранного трека: используется командой поиска и меню выбора.
+        """Запускает волну от выбранного трека: /search, меню выбора и поиск с кнопки плеера.
 
         Подходит для обоих случаев ответа: и когда `interaction.response` ещё
         не использован (одиночный результат поиска, после `defer()`), и когда
-        он уже израсходован на `edit_message` (выбор из меню) — в обоих
-        случаях ответ уходит через `interaction.followup`.
+        он уже израсходован на `edit_message` (выбор из меню) — `_send_started_ack`
+        сама решает, как ответить в каждом случае.
         """
         await self._ensure_connected(interaction)
-        started_track = await self._player.start_wave_from_track(track)
-        await self._send_wave_started(interaction, started_track)
+        await self._player.start_wave_from_track(track)
+        self._restart_stop_watch()
+        await self._send_started_ack(interaction)
+
+    async def _search_and_start(self, interaction: discord.Interaction, query: str) -> None:
+        """Ищет треки и либо сразу запускает волну, либо показывает меню выбора.
+
+        Общая ветка (пусто/один/несколько) для команды /search и модального
+        окна поиска на кнопке плеера — чтобы не дублировать её в двух местах.
+        Требует, чтобы `interaction.response` был уже отложен (`defer`)
+        вызывающим кодом.
+        """
+        tracks = await self._client.search_tracks(query, limit=MAX_SEARCH_RESULTS)
+
+        if not tracks:
+            await interaction.followup.send(
+                f"Ничего не найдено по запросу «{query}».",
+                # query — свободный текст пользователя, бот создан без глобального
+                # allowed_mentions (см. bot/__main__.py), поэтому без явного none()
+                # упоминание роли или @everyone внутри запроса ушло бы как
+                # настоящий пинг от имени бота.
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        if len(tracks) == 1:
+            await self._start_wave_from_track(interaction, tracks[0])
+            return
+
+        view = TrackSearchView(
+            tracks=tracks, author_id=interaction.user.id, on_select=self._start_wave_from_track
+        )
+        message = await interaction.followup.send(
+            embed=build_search_embed(query, tracks, EMBED_COLOR),
+            # См. комментарий выше про allowed_mentions: query подставляется в
+            # текст embed'а. Discord и так не резолвит упоминания внутри
+            # embed'ов в пинги, но параметр держим — это дешёвая защита,
+            # которую однажды уже пришлось вернуть после регресса.
+            allowed_mentions=discord.AllowedMentions.none(),
+            view=view,
+            wait=True,
+        )
+        view.attach_message(message)
 
     @app_commands.command(name="join", description="Подключиться к голосовому каналу")
     @app_commands.guild_only()
@@ -205,37 +450,7 @@ class MusicCog(commands.Cog, name="Музыка"):
     async def search(self, interaction: discord.Interaction, query: str) -> None:
         """Ищет треки по запросу: один найденный — сразу волна от него, несколько — меню выбора."""
         await interaction.response.defer()
-        tracks = await self._client.search_tracks(query, limit=MAX_SEARCH_RESULTS)
-
-        if not tracks:
-            await interaction.followup.send(
-                f"Ничего не найдено по запросу «{query}».",
-                # query — свободный текст пользователя, бот создан без глобального
-                # allowed_mentions (см. bot/__main__.py), поэтому без явного none()
-                # упоминание роли или @everyone внутри запроса ушло бы как
-                # настоящий пинг от имени бота.
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-
-        if len(tracks) == 1:
-            await self._start_wave_from_track(interaction, tracks[0])
-            return
-
-        view = TrackSearchView(
-            tracks=tracks, author_id=interaction.user.id, on_select=self._start_wave_from_track
-        )
-        message = await interaction.followup.send(
-            embed=build_search_embed(query, tracks, EMBED_COLOR),
-            # См. комментарий выше про allowed_mentions: query подставляется в
-            # текст embed'а. Discord и так не резолвит упоминания внутри
-            # embed'ов в пинги, но параметр держим — это дешёвая защита,
-            # которую однажды уже пришлось вернуть после регресса.
-            allowed_mentions=discord.AllowedMentions.none(),
-            view=view,
-            wait=True,
-        )
-        view.attach_message(message)
+        await self._search_and_start(interaction, query)
 
     @app_commands.command(name="skip", description="Пропустить текущий трек")
     @app_commands.guild_only()
