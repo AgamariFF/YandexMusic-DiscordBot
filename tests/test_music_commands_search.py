@@ -330,3 +330,172 @@ class TestSearchCommandBranching:
         assert "view" in call_args[1]
         view = call_args[1]["view"]
         assert isinstance(view, TrackSearchView)
+
+        # Проверяем что подключения к каналу не произошло - бот не должен
+        # заходить в канал, пока пользователь не выберет трек из меню
+        mock_player.connect.assert_not_called()
+
+
+class TestMusicCogWaveDescription:
+    """Тесты для отображения описания волны в embed'ах."""
+
+    @pytest.mark.asyncio
+    async def test_announce_includes_wave_description_field(self, cog_with_search):
+        """Анонс нового трека отправляет embed с полем "Волна"."""
+        cog, mock_client, mock_player = cog_with_search
+
+        track = TrackInfo(
+            id="track1",
+            feedback_id="track1:album1",
+            title="Test Song",
+            artists="Test Artist",
+            duration=180.0,
+            raw=None,
+        )
+
+        # Мокируем канал анонса
+        mock_channel = AsyncMock()
+        cog._announce_channel = mock_channel
+
+        # Вызываем _announce с конкретным описанием волны
+        wave_desc = "Моя волна по Test Artist — Test Song"
+        await cog._announce(track, wave_desc)
+
+        # Проверяем что было отправлено сообщение
+        mock_channel.send.assert_called_once()
+        call_args = mock_channel.send.call_args
+        embed = call_args[1]["embed"]
+
+        # Проверяем что embed содержит поле "Волна" с правильным значением
+        assert embed is not None
+        wave_field = None
+        for field in embed.fields:
+            if field.name == "Волна":
+                wave_field = field
+                break
+
+        assert wave_field is not None, "Поле 'Волна' должно присутствовать в embed"
+        assert wave_field.value == wave_desc, (
+            f"Значение 'Волна' должно быть '{wave_desc}', получено {wave_field.value}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_announce_wave_description_none_shows_fallback(self, cog_with_search):
+        """При wave_description=None показывается запасное значение '—'."""
+        cog, mock_client, mock_player = cog_with_search
+
+        track = TrackInfo(
+            id="track1",
+            feedback_id="track1:album1",
+            title="Test Song",
+            artists="Test Artist",
+            duration=180.0,
+            raw=None,
+        )
+
+        mock_channel = AsyncMock()
+        cog._announce_channel = mock_channel
+
+        # Вызываем с wave_description=None
+        await cog._announce(track, None)
+
+        mock_channel.send.assert_called_once()
+        call_args = mock_channel.send.call_args
+        embed = call_args[1]["embed"]
+
+        wave_field = None
+        for field in embed.fields:
+            if field.name == "Волна":
+                wave_field = field
+                break
+
+        assert wave_field is not None
+        assert wave_field.value == "—", (
+            f"При None wave_description должен быть '—', получено {wave_field.value}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_wave_started_includes_wave_description(self, cog_with_search):
+        """_send_wave_started берёт wave_description и помещает в embed."""
+        cog, mock_client, mock_player = cog_with_search
+
+        track = TrackInfo(
+            id="track1",
+            feedback_id="track1:album1",
+            title="Started Track",
+            artists="Artist",
+            duration=180.0,
+            raw=None,
+        )
+
+        # Устанавливаем wave_description в плеере
+        wave_desc = "Моя волна по Artist — Track"
+        mock_player.wave_description = wave_desc
+
+        interaction = create_mock_interaction_with_member_in_voice()
+
+        await cog._send_wave_started(interaction, track)
+
+        interaction.followup.send.assert_called_once()
+        call_args = interaction.followup.send.call_args
+        embed = call_args[1]["embed"]
+
+        wave_field = None
+        for field in embed.fields:
+            if field.name == "Волна":
+                wave_field = field
+                break
+
+        assert wave_field is not None, "Поле 'Волна' должно присутствовать в embed"
+        assert wave_field.value == wave_desc, (
+            f"Значение 'Волна' должно быть '{wave_desc}', получено {wave_field.value}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_nowplaying_includes_wave_description(self, cog_with_search):
+        """Команда /nowplaying выводит поле "Волна" с текущим описанием."""
+        cog, mock_client, mock_player = cog_with_search
+
+        track = TrackInfo(
+            id="current_track",
+            feedback_id="current_track:album1",
+            title="Now Playing",
+            artists="Current Artist",
+            duration=240.0,
+            raw=None,
+        )
+
+        # Мокируем now_playing() на плеере
+        from bot.player import NowPlaying
+
+        now_playing = NowPlaying(
+            track=track,
+            elapsed=120.0,
+            volume=0.75,
+            paused=False,
+            bass=MagicMock(label="Нет"),
+        )
+        mock_player.now_playing = MagicMock(return_value=now_playing)
+
+        # Устанавливаем wave_description
+        wave_desc = "Моя волна по Current Artist — Now Playing"
+        mock_player.wave_description = wave_desc
+
+        interaction = create_mock_interaction_with_member_in_voice()
+
+        await cog.nowplaying.callback(cog, interaction)
+
+        interaction.response.send_message.assert_called_once()
+        call_args = interaction.response.send_message.call_args
+        embed = call_args[1]["embed"]
+
+        wave_field = None
+        for field in embed.fields:
+            if field.name == "Волна":
+                wave_field = field
+                break
+
+        assert wave_field is not None, "Поле 'Волна' должно присутствовать в /nowplaying"
+        assert wave_field.value == wave_desc, (
+            f"Значение 'Волна' должно быть '{wave_desc}', получено {wave_field.value}"
+        )
