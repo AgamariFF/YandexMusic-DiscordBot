@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 
 WAVE_STATION_ID = "user:onyourwave"
 
+# Размер обложки, подставляемый вместо `%%` в шаблон `cover_uri`/`og_image`
+# (например, `avatars.yandex.net/get-music-content/.../%%`) методами
+# `get_cover_url`/`get_og_image_url` библиотеки — из самого кода это не
+# видно. 400×400 достаточно для крупного показа обложки в сообщении бота и
+# не тянет лишний трафик (проверено вживую: `get_cover_url("400x400")`
+# отвечает `200 image/jpeg`).
+COVER_URL_SIZE = "400x400"
+
 # Значение поля `from` — перечислимая метка контекста запуска, а не
 # свободный текст: сервер, судя по всему, её разбирает и учитывает при
 # подборе (иначе незачем было бы вообще передавать). Проверить со стороны
@@ -57,6 +65,10 @@ class TrackInfo:
     title: str
     artists: str
     duration: float
+    # Ссылка на обложку трека (для показа в сообщении бота). `None`, если у
+    # трека нет ни `cover_uri`, ни запасного `og_image` — такое редко, но
+    # встречается, и падать из-за отсутствия обложки нельзя.
+    cover_url: str | None
     raw: Any
 
     @property
@@ -425,11 +437,19 @@ class YandexMusicClient:
         (где `Track` уже приходит готовым объектом от библиотеки) — правила
         сборки не должны разъезжаться между этими двумя путями: пропуск
         недоступных треков (`available is False`), склейка артистов через
-        запятую и составной `feedback_id` вида `<id трека>:<id альбома>`, как
+        запятую, составной `feedback_id` вида `<id трека>:<id альбома>`, как
         шлёт официальное приложение (проверено дампом трафика: трек 38077233
-        с альбомом 4849007 уходит как "38077233:4849007"). Трек без альбомов
-        теоретически возможен — запасной вариант на голый `id` обязателен,
-        падать здесь нельзя.
+        с альбомом 4849007 уходит как "38077233:4849007"), и ссылка на
+        обложку. Трек без альбомов теоретически возможен — запасной вариант
+        на голый `id` обязателен, падать здесь нельзя.
+
+        `Track.get_cover_url` падает `AssertionError`, если у трека нет
+        `cover_uri` (внутри метода — `assert isinstance(self.cover_uri, str)`),
+        а это не доменная ошибка и наружу лететь не должно, поэтому наличие
+        `cover_uri` проверяем сами. При его отсутствии пробуем запасной
+        `og_image` (по данным разведки эти поля обычно совпадают) через тот
+        же `COVER_URL_SIZE`; если нет и его — обложки у трека действительно
+        нет, и `cover_url` остаётся `None`.
         """
         if track is None or track.available is False:
             return None
@@ -437,12 +457,18 @@ class YandexMusicClient:
         duration = (track.duration_ms / 1000) if track.duration_ms else 0.0
         album_id = track.albums[0].id if track.albums else None
         feedback_id = f"{track.id}:{album_id}" if album_id is not None else str(track.id)
+        cover_url: str | None = None
+        if isinstance(track.cover_uri, str):
+            cover_url = track.get_cover_url(COVER_URL_SIZE)
+        elif isinstance(track.og_image, str):
+            cover_url = track.get_og_image_url(COVER_URL_SIZE)
         return TrackInfo(
             id=str(track.id),
             feedback_id=feedback_id,
             title=track.title,
             artists=artists,
             duration=duration,
+            cover_url=cover_url,
             raw=track,
         )
 
