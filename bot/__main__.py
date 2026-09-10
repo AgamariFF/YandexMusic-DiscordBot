@@ -7,6 +7,7 @@ import logging
 import sys
 
 import discord
+import discord.voice_state
 from discord.ext import commands
 
 from bot.cogs.music import MusicCog
@@ -91,6 +92,46 @@ class WaveBot(commands.Bot):
         await super().close()
 
 
+def _disable_dave_protocol() -> None:
+    """Отключает DAVE (сквозное шифрование голоса Discord) для всего процесса бота.
+
+    discord.py 2.7.1 включает DAVE автоматически, если в окружении есть
+    библиотека `davey`: `discord/voice_state.py` определяет
+    `max_dave_protocol_version = davey.DAVE_PROTOCOL_VERSION if has_dave else 0`,
+    а этот флаг discord.py отправляет Discord при установке КАЖДОГО голосового
+    соединения (см. IDENTIFY в `discord/gateway.py`) — Discord включает DAVE в
+    ответ на ненулевое значение. `davey` у нас есть (приходит как часть extra
+    `discord.py[voice]` из requirements.txt — она нужна для отправки голоса,
+    удалять её нельзя), поэтому без этой правки DAVE включался бы всегда.
+
+    Штатного параметра «не использовать DAVE» ни у `Client`, ни у
+    `VoiceClient` нет — единственный рычаг, который на это влияет, это сам
+    модульный флаг `discord.voice_state.has_dave`. Патчим намеренно именно
+    его, а не одноимённый `has_dave` в `discord.voice_client` (тот — отдельная
+    привязка того же имени, импортированная туда `from .voice_state import
+    ...` на момент загрузки модуля): `VoiceProtocol.__init__` там бросает
+    `RuntimeError`, если `has_dave` ложно, то есть подмена этого второго имени
+    вообще запретила бы открывать голосовые соединения.
+
+    При включённом DAVE звук на пути между участниками зашифрован сквозным
+    образом, а `discord-ext-voice-recv` не умеет (и не должен уметь) его
+    расшифровывать — из-за этого приём голоса собеседника в чат-рулетке
+    невозможен в принципе (сквозное шифрование именно для этого и придумано).
+    Отключение затрагивает весь голосовой трафик бота на сервере, включая
+    музыку — для неё это безразлично, так как бот только отправляет звук и
+    ничего не принимает.
+
+    ВАЖНО: это патч приватной части discord.py, а не документированного
+    публичного API. При обновлении версии discord.py нужно заново проверить,
+    что `discord.voice_state.has_dave` там ещё существует и работает так же.
+    """
+    discord.voice_state.has_dave = False
+    logger.info(
+        "DAVE (сквозное шифрование голоса Discord) отключено сознательно: "
+        "иначе чат-рулетка не смогла бы принимать голос собеседника."
+    )
+
+
 def main() -> None:
     """Загружает конфигурацию, настраивает логирование и запускает бота."""
     try:
@@ -101,6 +142,7 @@ def main() -> None:
         sys.exit(1)
 
     setup_logging(config.log_level, secrets=config.secrets)
+    _disable_dave_protocol()
 
     bot = WaveBot(config)
     try:
