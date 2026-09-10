@@ -60,7 +60,11 @@ def encrypt_packet(message: dict[str, Any], *, secret: str, mode: int) -> dict[s
     """
     key = _derive_key(secret)
     iv = os.urandom(_IV_LENGTH)
-    plaintext = json.dumps(message).encode("utf-8")
+    # separators=(",", ":") — без пробелов после разделителей, как у браузерного
+    # JSON.stringify (он их не ставит). json.dumps по умолчанию добавляет ", " и
+    # ": ", это лишние байты в каждом сообщении и расхождение с тем, что шлёт
+    # настоящий клиент, хотя сервер, скорее всего, разберёт и то и другое.
+    plaintext = json.dumps(message, separators=(",", ":")).encode("utf-8")
     ciphertext = AESGCM(key).encrypt(iv, plaintext, None)
     return {
         "s": base64.b64encode(ciphertext).decode("ascii"),

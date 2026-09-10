@@ -188,11 +188,12 @@ def build_offer_message(connection_id: str, *, sdp: str, type_: str) -> dict[str
     Поле "offer" — не вложенный объект, а СТРОКА с JSON вида {"sdp": ...,
     "type": ...} (проверено дампом протокола) — если положить туда словарь
     как есть, сервер сообщение не примет. Не убирайте `json.dumps` как
-    «лишнюю» обёртку.
+    «лишнюю» обёртку. `separators=(",", ":")` — без пробелов после
+    разделителей, как у браузерного `JSON.stringify`, который их не ставит.
     """
     return {
         "type": "offer",
-        "offer": json.dumps({"sdp": sdp, "type": type_}),
+        "offer": json.dumps({"sdp": sdp, "type": type_}, separators=(",", ":")),
         "connectionId": connection_id,
     }
 
@@ -201,7 +202,7 @@ def build_answer_message(connection_id: str, *, sdp: str, type_: str) -> dict[st
     """Собирает сообщение "answer" (строковый JSON внутри поля — см. `build_offer_message`)."""
     return {
         "type": "answer",
-        "answer": json.dumps({"sdp": sdp, "type": type_}),
+        "answer": json.dumps({"sdp": sdp, "type": type_}, separators=(",", ":")),
         "connectionId": connection_id,
     }
 
