@@ -105,6 +105,17 @@ class RouletteCog(commands.Cog, name="Чат-рулетка"):
             on_status_changed=self._update_status_message,
         )
 
+    @property
+    def roulette(self) -> GuildRoulette:
+        """Единственная чат-рулетка, обслуживающая сервер бота.
+
+        Нужна другим когам, которым приходится делить с рулеткой одно
+        голосовое соединение гильдии — сейчас это `bot.cogs.listen.ListenCog`
+        (см. её докстринг про взаимоисключение), по тому же образцу, что и
+        `MusicCog.player`.
+        """
+        return self._roulette
+
     async def cog_unload(self) -> None:
         """Останавливает текущий RouletteView и саму рулетку при выгрузке кога."""
         if self._status_view is not None:

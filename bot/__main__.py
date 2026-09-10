@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from pathlib import Path
 
 import discord
 from discord.ext import commands
 
+from bot.cogs.listen import ListenCog
 from bot.cogs.music import MusicCog
 from bot.cogs.roulette import RouletteCog
 from bot.config import Config, load_config
 from bot.errors import ConfigError, YandexAuthError
 from bot.logging_setup import setup_logging
+from bot.roulette import GuildRoulette
 from bot.voice_dave import diagnostics_enabled
 from bot.yandex import YandexMusicClient
 
@@ -49,13 +52,36 @@ class WaveBot(commands.Bot):
         music_cog = MusicCog(self, self._config, client)
         await self.add_cog(music_cog)
 
+        roulette: GuildRoulette | None = None
         if self._config.nekto_token:
-            await self.add_cog(RouletteCog(self, self._config, music_cog.player))
+            roulette_cog = RouletteCog(self, self._config, music_cog.player)
+            await self.add_cog(roulette_cog)
+            roulette = roulette_cog.roulette
             logger.info("Чат-рулетка включена.")
         else:
             logger.info(
                 "NEKTO_TOKEN не задан — команды чат-рулетки отключены, "
                 "остальной функционал бота не затронут."
+            )
+
+        await self.add_cog(ListenCog(self, self._config, music_cog.player, roulette))
+        # Path.is_dir() — блокирующий вызов файловой системы; сам по себе он
+        # почти мгновенный (это не загрузка модели, только проверка
+        # существования каталога), но в корутине event loop даже такой
+        # быстрый блокирующий вызов лучше не делать напрямую — уносим в поток.
+        speech_model_found = await asyncio.to_thread(
+            Path(self._config.speech_model_path).is_dir
+        )
+        if speech_model_found:
+            logger.info(
+                "Распознавание речи включено (команды /listen, /listen_stop), модель: %s",
+                self._config.speech_model_path,
+            )
+        else:
+            logger.warning(
+                "Модель распознавания речи не найдена по пути %s — команда /listen ответит "
+                "понятной ошибкой, пока модель не будет скачана (см. README).",
+                self._config.speech_model_path,
             )
 
         if diagnostics_enabled():

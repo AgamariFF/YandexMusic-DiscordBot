@@ -15,6 +15,7 @@ _DEFAULT_LOG_LEVEL = "INFO"
 _DEFAULT_VOLUME = 0.5
 _DEFAULT_FFMPEG_PATH = "ffmpeg"
 _DEFAULT_IDLE_TIMEOUT = 300
+_DEFAULT_SPEECH_MODEL_PATH = "models/vosk-model-small-ru-0.22"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,7 @@ class Config:
     idle_timeout: int
     nekto_token: str
     nekto_user_agent: str
+    speech_model_path: str
 
     @property
     def secrets(self) -> tuple[str, ...]:
@@ -116,6 +118,17 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
             "действителен только с User-Agent того же браузера, которым он был получен."
         )
 
+    # Путь к модели Vosk для распознавания речи — как и FFMPEG_PATH, только
+    # проверяется на формат (непустая строка), а не на реальное наличие на
+    # диске: модель весит десятки мегабайт и не кладётся в репозиторий (см.
+    # .gitignore), поэтому её отсутствие — обычное дело при первом запуске.
+    # Ошибку в этом случае показывает сама команда распознавания, а не
+    # загрузка конфигурации (см. bot.speech.SpeechRecognizer), чтобы бот всё
+    # равно запускался и работал без этой функции.
+    speech_model_path = (
+        os.environ.get("SPEECH_MODEL_PATH", "").strip() or _DEFAULT_SPEECH_MODEL_PATH
+    )
+
     return Config(
         discord_token=discord_token,
         guild_id=guild_id,
@@ -126,4 +139,5 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
         idle_timeout=idle_timeout,
         nekto_token=nekto_token,
         nekto_user_agent=nekto_user_agent,
+        speech_model_path=speech_model_path,
     )

@@ -77,3 +77,9 @@ class RouletteNotActiveError(BotError):
     """Команда требует запущенной чат-рулетки, но сейчас она не активна на этом сервере."""
 
     default_message = "Чат-рулетка сейчас не запущена."
+
+
+class SpeechModelUnavailableError(BotError):
+    """Модель распознавания речи (Vosk) не найдена на диске или не может быть загружена."""
+
+    default_message = "Модель распознавания речи недоступна."
