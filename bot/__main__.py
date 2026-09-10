@@ -14,6 +14,7 @@ from bot.cogs.roulette import RouletteCog
 from bot.config import Config, load_config
 from bot.errors import ConfigError, YandexAuthError
 from bot.logging_setup import setup_logging
+from bot.voice_dave import diagnostics_enabled
 from bot.yandex import YandexMusicClient
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,12 @@ class WaveBot(commands.Bot):
             logger.info(
                 "NEKTO_TOKEN не задан — команды чат-рулетки отключены, "
                 "остальной функционал бота не затронут."
+            )
+
+        if diagnostics_enabled():
+            logger.info(
+                "Подробная диагностика приёма голоса включена (VOICE_RECV_DIAG) — "
+                "лог первых пакетов и далее раз в N, см. bot.voice_dave."
             )
 
         guild = discord.Object(id=self._config.guild_id)

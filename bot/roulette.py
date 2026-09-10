@@ -41,6 +41,7 @@ from bot.nekto.audio import (
     DISCORD_SAMPLE_WIDTH,
     build_discord_resampler,
 )
+from bot.voice_dave import install_dave_decryption
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +249,12 @@ class GuildRoulette:
                 self._source = _PeerAudioSource()
                 self._voice_client.play(self._source)
                 self._voice_client.listen(_DiscordToPeerSink(self))
+                # Discord требует DAVE (сквозное шифрование) на этом канале —
+                # без этого слоя приём голоса падает с CryptoError либо
+                # декодирует ещё DAVE-зашифрованный Opus как сырой. Подробности
+                # и почему подмена именно здесь и именно так — см. докстринг
+                # bot.voice_dave.
+                install_dave_decryption(self._voice_client)
             elif self._voice_client.channel is None or self._voice_client.channel.id != channel.id:
                 await self._voice_client.move_to(channel)
             self._channel = channel
