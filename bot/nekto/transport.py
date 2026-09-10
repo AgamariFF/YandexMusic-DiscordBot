@@ -1,4 +1,6 @@
-"""Транспорт nekto.me: Socket.IO-соединение и рукопожатие (register → registered → web-agent)."""
+"""Транспорт nekto.me: Socket.IO-соединение, рукопожатие (register → registered → web-agent) и
+шифрование прикладных сообщений (e-socket, см. `bot.nekto.esocket` и docs/nekto-esocket.md).
+"""
 
 from __future__ import annotations
 
@@ -11,6 +13,14 @@ from typing import Any
 import socketio
 
 from bot.nekto.errors import NektoBannedError, NektoConnectError, NektoProtocolError
+from bot.nekto.esocket import (
+    MODE_REGISTER,
+    MODE_SESSION,
+    REGISTER_SECRET,
+    decrypt_packet,
+    encrypt_packet,
+    is_encrypted_packet,
+)
 from bot.nekto.protocol import (
     ENDPOINT,
     SOCKETIO_EVENT,
@@ -86,6 +96,14 @@ class NektoTransport:
     обработчик, установленный через `set_message_handler`. Исключения
     `socketio` наружу не пропускаются — вызывающий код получает только
     доменные ошибки модуля.
+
+    Все прикладные сообщения на проводе завёрнуты в шифрованный пакет
+    e-socket (см. `bot.nekto.esocket` и docs/nekto-esocket.md) — этот класс
+    отвечает и за выбор ключа: "register" всегда шифруется зашитым
+    секретом, а всё остальное — сессионным ключом, который сервис присылает
+    в ответе "registered". Пока сессионный ключ не получен, исходящие
+    сообщения из `send()` копятся в `_pending_messages` и уходят разом,
+    как только ключ появляется.
     """
 
     def __init__(
@@ -106,6 +124,11 @@ class NektoTransport:
         self._registered = asyncio.Event()
         self._handshake_error: Exception | None = None
         self._closed = False
+        # Сессионный ключ шифрования e-socket приходит от сервера в ответе
+        # "registered" (см. `_handle_registered`); до этого момента он None,
+        # и всё, что просят отправить через `send()`, копится в очереди.
+        self._session_key: str | None = None
+        self._pending_messages: list[dict[str, Any]] = []
         self._register_socketio_handlers()
 
     def set_message_handler(self, handler: MessageHandler) -> None:
@@ -129,6 +152,11 @@ class NektoTransport:
         """
         self._registered.clear()
         self._handshake_error = None
+        # Сброс на каждое подключение: сессионный ключ прошлого соединения
+        # (если было) больше не действителен, а сообщения, не успевшие уйти
+        # до разрыва, нельзя тащить в новую сессию — сервер их не поймёт.
+        self._session_key = None
+        self._pending_messages = []
         try:
             async with asyncio.timeout(DEFAULT_HANDSHAKE_TIMEOUT):
                 await self._sio.connect(
@@ -171,14 +199,17 @@ class NektoTransport:
         logger.info("Рукопожатие с nekto.me завершено")
 
     async def send(self, payload: dict[str, Any]) -> None:
-        """Отправляет прикладное сообщение протокола событием Socket.IO "event"."""
-        try:
-            await self._sio.emit(SOCKETIO_EVENT, data=payload)
-        except socketio.exceptions.SocketIOError as exc:
-            raise NektoConnectError(
-                f"Не удалось отправить сообщение nekto.me: {type(exc).__name__}: {exc}",
-                user_message="Связь с чат-рулеткой потеряна.",
-            ) from exc
+        """Отправляет прикладное сообщение протокола, зашифровав его сессионным ключом.
+
+        Пока сессионный ключ не получен от сервера (ответ "registered" ещё в
+        пути), шифровать сообщение нечем, а отправлять его открытым текстом
+        сервис не примет — поэтому оно копится в `_pending_messages` и
+        уходит целиком, как только `_handle_registered` заполнит ключ.
+        """
+        if self._session_key is None:
+            self._pending_messages.append(payload)
+            return
+        await self._emit_encrypted(payload, secret=self._session_key, mode=MODE_SESSION)
 
     async def close(self) -> None:
         """Идемпотентно закрывает Socket.IO-соединение."""
@@ -199,23 +230,82 @@ class NektoTransport:
 
         @self._sio.event
         async def connect() -> None:
-            logger.debug("Socket.IO-соединение с nekto.me открыто, отправляем register")
-            await self._sio.emit(
-                SOCKETIO_EVENT,
-                data=build_register_message(
+            logger.debug(
+                "Socket.IO-соединение с nekto.me открыто, отправляем зашифрованный register"
+            )
+            await self._emit_encrypted(
+                build_register_message(
                     self._token,
                     timezone=self._timezone,
                     locale=self._locale,
                     user_agent=self._user_agent,
                 ),
+                secret=REGISTER_SECRET,
+                mode=MODE_REGISTER,
             )
 
         @self._sio.on(SOCKETIO_EVENT)
         async def on_event(payload: dict[str, Any]) -> None:
             await self._on_message(payload)
 
+    async def _emit_packet(self, packet: dict[str, Any]) -> None:
+        """Отправляет уже собранный пакет (зашифрованный или служебный) событием "event"."""
+        try:
+            await self._sio.emit(SOCKETIO_EVENT, data=packet)
+        except socketio.exceptions.SocketIOError as exc:
+            raise NektoConnectError(
+                f"Не удалось отправить сообщение nekto.me: {type(exc).__name__}: {exc}",
+                user_message="Связь с чат-рулеткой потеряна.",
+            ) from exc
+
+    async def _emit_encrypted(self, message: dict[str, Any], *, secret: str, mode: int) -> None:
+        """Шифрует сообщение под нужный режим/ключ (см. `bot.nekto.esocket`) и отправляет его."""
+        await self._emit_packet(encrypt_packet(message, secret=secret, mode=mode))
+
+    async def _flush_pending_messages(self, *, session_key: str) -> None:
+        """Отправляет сообщения, накопленные в `send()`, пока сессионного ключа ещё не было."""
+        pending, self._pending_messages = self._pending_messages, []
+        for message in pending:
+            await self._emit_encrypted(message, secret=session_key, mode=MODE_SESSION)
+
+    def _decrypt_incoming(self, packet: dict[str, Any]) -> dict[str, Any]:
+        """Выбирает ключ по режиму пакета (`_`) и расшифровывает его через `bot.nekto.esocket`."""
+        mode = packet.get("_")
+        if mode == MODE_REGISTER:
+            secret = REGISTER_SECRET
+        elif mode == MODE_SESSION:
+            if self._session_key is None:
+                raise NektoProtocolError(
+                    "Получен зашифрованный пакет nekto.me до появления сессионного ключа",
+                    user_message="Сервис чат-рулетки вернул неожиданные данные.",
+                )
+            secret = self._session_key
+        else:
+            raise NektoProtocolError(
+                f"Неизвестный режим шифрования пакета nekto.me: {mode!r}",
+                user_message="Сервис чат-рулетки вернул неожиданные данные.",
+            )
+        return decrypt_packet(packet, secret=secret)
+
     async def _on_message(self, payload: dict[str, Any]) -> None:
-        """Разбирает входящее сообщение: "registered" завершает рукопожатие, остальное — наружу."""
+        """Разбирает входящее сообщение: "registered" завершает рукопожатие, остальное — наружу.
+
+        Входящий пакет сперва проверяется на признаки шифрования (см.
+        `is_encrypted_packet`) — не все входящие сообщения зашифрованы,
+        например ответ "registered" несёт сессионный ключ открытым текстом.
+        Если пакет зашифрован, но расшифровать не удалось (битые данные,
+        неверный ключ), пакет молча пропускается: соединение это не рвёт и
+        исключений библиотеки шифрования наружу не выпускает.
+        """
+        if is_encrypted_packet(payload):
+            try:
+                payload = self._decrypt_incoming(payload)
+            except NektoProtocolError:
+                logger.warning(
+                    "Не удалось расшифровать пакет nekto.me, пакет пропущен", exc_info=True
+                )
+                return
+
         message_type = payload.get("type")
 
         if message_type == TYPE_REGISTERED:
@@ -237,7 +327,12 @@ class NektoTransport:
             await self._handler(payload)
 
     async def _handle_registered(self, payload: dict[str, Any]) -> None:
-        """Обрабатывает "registered": считает подпись рукопожатия и отправляет "web-agent"."""
+        """Обрабатывает "registered": принимает сессионный ключ и отправляет "web-agent".
+
+        Поле "s" ответа — не шифротекст, а сам сессионный ключ e-socket
+        строкой (см. docs/nekto-esocket.md); дальше им шифруется всё, кроме
+        уже отправленного "register". Ключ не логируется.
+        """
         internal_id = payload.get("internal_id")
         if internal_id is None:
             self._handshake_error = NektoProtocolError(
@@ -247,15 +342,28 @@ class NektoTransport:
             self._registered.set()
             return
 
+        session_key = payload.get("s")
+        if not isinstance(session_key, str) or not session_key:
+            self._handshake_error = NektoProtocolError(
+                "Ответ registered не содержит сессионный ключ шифрования",
+                user_message="Сервис чат-рулетки вернул неожиданный ответ.",
+            )
+            self._registered.set()
+            return
+        self._session_key = session_key
+
         signature = compute_web_agent_signature(self._token, internal_id)
         try:
-            await self._sio.emit(SOCKETIO_EVENT, data=build_web_agent_message(signature))
-        except socketio.exceptions.SocketIOError as exc:
+            await self._emit_encrypted(
+                build_web_agent_message(signature), secret=session_key, mode=MODE_SESSION
+            )
+        except NektoConnectError as exc:
             self._handshake_error = NektoConnectError(
-                f"Не удалось отправить web-agent nekto.me: {type(exc).__name__}: {exc}",
+                f"Не удалось отправить web-agent nekto.me: {exc}",
                 user_message="Не удалось подключиться к чат-рулетке.",
             )
             self._registered.set()
             return
 
+        await self._flush_pending_messages(session_key=session_key)
         self._registered.set()
