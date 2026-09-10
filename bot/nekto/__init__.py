@@ -15,6 +15,7 @@ from bot.nekto.errors import (
 )
 from bot.nekto.events import (
     BannedEvent,
+    CaptchaRequiredEvent,
     NektoEvent,
     PeerFoundEvent,
     PeerLeftEvent,
@@ -26,6 +27,7 @@ from bot.nekto.session import NektoSession
 __all__ = [
     "AgeRange",
     "BannedEvent",
+    "CaptchaRequiredEvent",
     "NektoBannedError",
     "NektoConnectError",
     "NektoEvent",

@@ -35,4 +35,22 @@ class ProtocolErrorEvent:
     description: str
 
 
-NektoEvent = PeerFoundEvent | PeerLeftEvent | BannedEvent | ProtocolErrorEvent
+@dataclass(frozen=True, slots=True)
+class CaptchaRequiredEvent:
+    """Сервис требует пройти капчу и не ставит клиента в очередь поиска собеседника.
+
+    Приходит вместо начала поиска в ответ на "scan-for-peer": сервис
+    прислал "captcha-request" (проверено живьём, `captcha_type` в этом
+    случае — "RECAPTCHA") и до прохождения капчи в очередь не ставит —
+    см. докстринг `bot.nekto.protocol.SearchCriteria`. Сам модуль капчу
+    не проходит и ничего с ней не делает — только сообщает наружу, чтобы
+    вызывающий код (ког рулетки) мог уведомить пользователя вместо
+    молчаливого бесконечного ожидания.
+    """
+
+    captcha_type: Any
+
+
+NektoEvent = (
+    PeerFoundEvent | PeerLeftEvent | BannedEvent | ProtocolErrorEvent | CaptchaRequiredEvent
+)

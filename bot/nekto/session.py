@@ -14,6 +14,7 @@ from bot.nekto.audio import IncomingAudioSink, OutgoingAudioTrack
 from bot.nekto.errors import NektoBannedError, NektoStateError
 from bot.nekto.events import (
     BannedEvent,
+    CaptchaRequiredEvent,
     NektoEvent,
     PeerFoundEvent,
     PeerLeftEvent,
@@ -24,11 +25,13 @@ from bot.nekto.protocol import (
     DEFAULT_TIMEZONE,
     TYPE_ANSWER,
     TYPE_BAN,
+    TYPE_CAPTCHA_REQUEST,
     TYPE_ERROR,
     TYPE_ICE_CANDIDATE,
     TYPE_OFFER,
     TYPE_PEER_CONNECT,
     TYPE_PEER_DISCONNECT,
+    TYPE_USERS_COUNT,
     SearchCriteria,
     build_peer_disconnect_message,
     build_scan_message,
@@ -287,6 +290,13 @@ class NektoSession:
                 await self._handle_error(payload)
             elif message_type in (TYPE_OFFER, TYPE_ANSWER, TYPE_ICE_CANDIDATE):
                 await self._handle_signaling(message_type, payload)
+            elif message_type == TYPE_CAPTCHA_REQUEST:
+                await self._handle_captcha_request(payload)
+            elif message_type == TYPE_USERS_COUNT:
+                # Тип известен намеренно, обрабатывать нечего — просто
+                # статистика сервиса (см. `TYPE_USERS_COUNT`), не мешаем
+                # логу пометкой "неизвестный тип".
+                logger.debug("Статистика nekto.me (users-count): %r", payload)
             else:
                 logger.debug("Неизвестный тип сообщения nekto.me: %r", message_type)
 
@@ -350,6 +360,10 @@ class NektoSession:
                 error_id=payload.get("id"), description=str(payload.get("description", ""))
             )
         )
+
+    async def _handle_captcha_request(self, payload: dict[str, Any]) -> None:
+        """Обрабатывает "captcha-request": сервис не ставит в очередь, пока капча не пройдена."""
+        await self._push_event(CaptchaRequiredEvent(captcha_type=payload.get("captchaType")))
 
     async def _handle_signaling(self, message_type: str, payload: dict[str, Any]) -> None:
         """Делегирует сигнальные сообщения WebRTC ("offer"/"answer"/"ice-candidate") каналу."""
