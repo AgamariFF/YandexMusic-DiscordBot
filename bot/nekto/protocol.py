@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 # --- Транспорт ---------------------------------------------------------
 
-ENDPOINT = "wss://audio.nekto.me/"
+ENDPOINT = "wss://audio.nekto.me/?_v=1"
 SOCKETIO_PATH = "websocket"
 TRANSPORTS = ["websocket"]
 
@@ -147,7 +147,7 @@ def build_register_message(
         "timeZone": timezone,
         "locale": locale,
     }
-    if "Gecko" in user_agent:
+    if "Firefox/" in user_agent:
         message["firefox"] = True
     return message
 

@@ -4,5 +4,5 @@ yandex-music>=3.0.0
 python-dotenv>=1.0
 PyNaCl>=1.5
 aiortc>=1.9.0
-python-socketio>=5.11
+python-socketio>=4.6,<5
 av>=12.0

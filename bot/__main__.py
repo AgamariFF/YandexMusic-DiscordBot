@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 
@@ -58,8 +59,21 @@ class WaveBot(commands.Bot):
 
         guild = discord.Object(id=self._config.guild_id)
         self.tree.copy_global_to(guild=guild)
-        await self.tree.sync(guild=guild)
-        logger.info("Команды синхронизированы для сервера %s", self._config.guild_id)
+        try:
+            async with asyncio.timeout(15):
+                await self.tree.sync(guild=guild)
+        except TimeoutError:
+            logger.error(
+                "Синхронизация команд для сервера %s превысила 15 секунд; продолжаем запуск бота.",
+                self._config.guild_id,
+            )
+        except discord.HTTPException:
+            logger.exception(
+                "Не удалось синхронизировать команды для сервера %s; продолжаем запуск бота.",
+                self._config.guild_id,
+            )
+        else:
+            logger.info("Команды синхронизированы для сервера %s", self._config.guild_id)
 
     async def on_ready(self) -> None:
         """Логирует успешное подключение бота к Discord."""

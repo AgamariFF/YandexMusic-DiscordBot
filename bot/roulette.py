@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import logging
 import queue as sync_queue
+import time
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 
@@ -131,14 +132,26 @@ class _DiscordToPeerSink(voice_recv.AudioSink):
         """Запоминает владеющий `GuildRoulette` — через него достаёт сессию и event loop."""
         super().__init__()
         self._roulette = roulette
+        self._decoders: dict[int, discord.opus.Decoder] = {}
+        self._last_opus_error_log = 0.0
 
     def wants_opus(self) -> bool:
-        """Нужен уже декодированный PCM — сессия сама заворачивает его в `av.AudioFrame`."""
-        return False
+        """Получает Opus и декодирует его с защитой от битых UDP-пакетов."""
+        return True
 
     def write(self, user: discord.Member | discord.User | None, data: voice_recv.VoiceData) -> None:
-        """Заворачивает PCM говорящего в `av.AudioFrame` и передаёт его в event loop."""
-        pcm = data.pcm
+        """Декодирует Opus говорящего и передаёт PCM в event loop."""
+        if not data.opus:
+            return
+        decoder = self._decoders.setdefault(data.packet.ssrc, discord.opus.Decoder())
+        try:
+            pcm = decoder.decode(data.opus, fec=False)
+        except discord.opus.OpusError:
+            now = time.monotonic()
+            if now - self._last_opus_error_log >= 5.0:
+                logger.debug("Пропускаются повреждённые Opus-пакеты от %s", user)
+                self._last_opus_error_log = now
+            return
         sample_size = DISCORD_CHANNELS * DISCORD_SAMPLE_WIDTH
         samples, remainder = divmod(len(pcm), sample_size)
         if samples == 0:
@@ -155,6 +168,7 @@ class _DiscordToPeerSink(voice_recv.AudioSink):
 
     def cleanup(self) -> None:
         """Явно нечего освобождать — сессия и event loop живут вне сина, за пределами его жизни."""
+        self._decoders.clear()
 
 
 class GuildRoulette:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -29,6 +30,53 @@ DEFAULT_HANDSHAKE_TIMEOUT = 15.0
 MessageHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
+def _split_socketio_packets(data: str) -> list[str]:
+    """Разделяет склеенные Socket.IO-пакеты, которые возвращает nekto.me."""
+    packets: list[str] = []
+    offset = 0
+    decoder = json.JSONDecoder()
+    while offset < len(data):
+        while offset < len(data) and data[offset] in ",\" \r\n\t":
+            offset += 1
+        if offset == len(data):
+            break
+        if not data[offset].isdigit():
+            logger.warning("Некорректный хвост Socket.IO-буфера nekto.me: %r", data[offset:])
+            break
+        json_start = next(
+            (index for index in range(offset, len(data)) if data[index] in "[{"),
+            None,
+        )
+        if json_start is None:
+            packets.append(data[offset:])
+            break
+        try:
+            _, json_end = decoder.raw_decode(data, json_start)
+        except json.JSONDecodeError:
+            return [data]
+        packets.append(data[offset:json_end])
+        offset = json_end
+    return packets or [data]
+
+
+class _NektoSocketIOClient(socketio.AsyncClient):
+    """Socket.IO-клиент с поддержкой склеенных кадров nekto.me."""
+
+    async def _handle_eio_message(self, data: Any) -> None:
+        if isinstance(data, str):
+            packets = _split_socketio_packets(data)
+            if not packets:
+                return
+            if len(packets) > 1:
+                for packet_data in packets:
+                    await super()._handle_eio_message(packet_data)
+                return
+        try:
+            await super()._handle_eio_message(data)
+        except json.JSONDecodeError:
+            logger.warning("Некорректный Socket.IO-пакет nekto.me: %r", data)
+
+
 class NektoTransport:
     """Устанавливает Socket.IO-соединение с nekto.me и проводит рукопожатие register/web-agent.
 
@@ -53,7 +101,7 @@ class NektoTransport:
         self._user_agent = user_agent
         self._timezone = timezone
         self._locale = locale
-        self._sio = socketio.AsyncClient()
+        self._sio = _NektoSocketIOClient()
         self._handler: MessageHandler | None = None
         self._registered = asyncio.Event()
         self._handshake_error: Exception | None = None
@@ -87,7 +135,10 @@ class NektoTransport:
                     ENDPOINT,
                     transports=TRANSPORTS,
                     socketio_path=SOCKETIO_PATH,
-                    headers={"User-Agent": self._user_agent},
+                    headers={
+                        "Origin": "https://nekto.me",
+                        "User-Agent": self._user_agent,
+                    },
                 )
         except TimeoutError as exc:
             raise NektoConnectError(
