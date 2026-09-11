@@ -16,6 +16,9 @@ _DEFAULT_VOLUME = 0.5
 _DEFAULT_FFMPEG_PATH = "ffmpeg"
 _DEFAULT_IDLE_TIMEOUT = 300
 _DEFAULT_SPEECH_MODEL_PATH = "models/vosk-model-small-ru-0.22"
+# Предел отладочной записи речи на одного говорящего — см.
+# bot.speech_debug.DEFAULT_MAX_SECONDS про то, почему предел вообще нужен.
+_DEFAULT_SPEECH_DEBUG_MAX_SECONDS = 600.0
 
 # Значения переменных окружения, считающиеся истиной для булевых флагов —
 # тот же набор, что и у VOICE_RECV_DIAG (см. bot.voice_dave.diagnostics_enabled),
@@ -39,6 +42,8 @@ class Config:
     speech_model_path: str
     speech_enabled: bool
     speech_transcript: bool
+    speech_debug_dir: str
+    speech_debug_max_seconds: float
 
     @property
     def secrets(self) -> tuple[str, ...]:
@@ -159,6 +164,27 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
     # разговоров в чат.
     speech_transcript = _parse_bool_env("SPEECH_TRANSCRIPT", default=False)
 
+    # Каталог отладочной записи речи (см. bot.speech_debug): пустое значение
+    # — запись выключена, и это единственный разумный умолчательный режим.
+    # Постоянно писать на диск чужую речь недопустимо, поэтому включается
+    # только явным указанием каталога, на время разбора проблемы.
+    speech_debug_dir = os.environ.get("SPEECH_DEBUG_DIR", "").strip()
+
+    speech_debug_max_seconds_raw = os.environ.get("SPEECH_DEBUG_MAX_SECONDS", "").strip()
+    if not speech_debug_max_seconds_raw:
+        speech_debug_max_seconds = _DEFAULT_SPEECH_DEBUG_MAX_SECONDS
+    else:
+        try:
+            speech_debug_max_seconds = float(speech_debug_max_seconds_raw)
+        except ValueError as exc:
+            raise ConfigError(
+                "Переменная окружения SPEECH_DEBUG_MAX_SECONDS должна быть числом."
+            ) from exc
+    if speech_debug_max_seconds <= 0:
+        raise ConfigError(
+            "Переменная окружения SPEECH_DEBUG_MAX_SECONDS должна быть положительным числом."
+        )
+
     return Config(
         discord_token=discord_token,
         guild_id=guild_id,
@@ -172,4 +198,6 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
         speech_model_path=speech_model_path,
         speech_enabled=speech_enabled,
         speech_transcript=speech_transcript,
+        speech_debug_dir=speech_debug_dir,
+        speech_debug_max_seconds=speech_debug_max_seconds,
     )

@@ -34,6 +34,8 @@ def _make_config() -> Config:
         speech_model_path="models/vosk-model-small-ru-0.22",
         speech_enabled=True,
         speech_transcript=False,
+        speech_debug_dir="",
+        speech_debug_max_seconds=600.0,
     )
 
 

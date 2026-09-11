@@ -38,6 +38,7 @@ from discord.ext import voice_recv
 
 from bot.nekto.audio import DISCORD_CHANNELS, DISCORD_SAMPLE_RATE, DISCORD_SAMPLE_WIDTH
 from bot.speech import SAMPLE_RATE, SpeechRecognizer
+from bot.speech_debug import SpeechRecorder
 from bot.voice_dave import install_dave_decryption
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,12 @@ class _DiscordToSpeechSink(voice_recv.AudioSink):
                 )
                 self._last_unknown_user_log = now
             return
+        recorder = self._listener.recorder
+        if recorder is not None:
+            # Потери считаются ДО декодирования и до всех проверок ниже:
+            # пакет, отброшенный дальше по коду, всё равно пришёл, и для
+            # статистики связи важен сам факт его получения.
+            recorder.loss_tracker.note(user.id, data.packet.sequence)
         decoder = self._decoders.setdefault(data.packet.ssrc, discord.opus.Decoder())
         try:
             pcm = decoder.decode(data.opus, fec=False)
@@ -144,14 +151,18 @@ class GuildListener:
         *,
         recognizer: SpeechRecognizer,
         on_phrase: Callable[[int, str], Awaitable[None]] | None = None,
+        recorder: SpeechRecorder | None = None,
     ) -> None:
-        """Запоминает распознаватель речи и колбэк на распознанную фразу.
+        """Запоминает распознаватель речи, колбэк на фразу и отладочную запись.
 
         К уже открытому чужому соединению подключает `attach()` —
-        конструктор сети не касается.
+        конструктор сети не касается. `recorder` — необязательная отладочная
+        запись всего услышанного (см. `bot.speech_debug`); `None` означает,
+        что запись выключена, и тогда приём идёт ровно как раньше.
         """
         self._recognizer = recognizer
         self._on_phrase = on_phrase
+        self._recorder = recorder
 
         self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -160,6 +171,11 @@ class GuildListener:
 
         self._queues: dict[int, asyncio.Queue[av.AudioFrame]] = {}
         self._pump_tasks: dict[int, asyncio.Task[None]] = {}
+
+    @property
+    def recorder(self) -> SpeechRecorder | None:
+        """Отладочная запись услышанного либо None, если она выключена."""
+        return self._recorder
 
     @property
     def is_active(self) -> bool:
@@ -323,8 +339,17 @@ class GuildListener:
                 pcm = bytes(resampled.planes[0])
                 if not pcm:
                     continue
+                if self._recorder is not None:
+                    # Записывается PCM ровно в том виде, в каком он уходит
+                    # в распознавание, — в этом весь смысл отладочной
+                    # записи (см. модульный докстринг bot.speech_debug):
+                    # запись «до» ресемплинга не ответила бы на вопрос,
+                    # что именно слышала модель.
+                    self._recorder.write(speaker_id, pcm)
                 text = await self._recognizer.feed(speaker_id, pcm)
                 if text:
+                    if self._recorder is not None:
+                        self._recorder.note_phrase(speaker_id, text)
                     await self._emit_phrase(speaker_id, text)
 
     async def _emit_phrase(self, speaker_id: int, text: str) -> None:

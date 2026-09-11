@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 
@@ -40,6 +41,7 @@ from bot.config import Config
 from bot.errors import SpeechModelUnavailableError
 from bot.listening import GuildListener
 from bot.speech import SpeechRecognizer
+from bot.speech_debug import SpeechRecorder
 from bot.voice_commands import (
     VoiceCommand,
     is_wake_word_only,
@@ -72,7 +74,21 @@ class VoiceControlCog(commands.Cog, name="Голосовое управлени�
         self._config = config
         self._music_cog: MusicCog | None = None
         self._recognizer = SpeechRecognizer(model_path=config.speech_model_path)
-        self._listener = GuildListener(recognizer=self._recognizer, on_phrase=self._handle_phrase)
+        # Отладочная запись всего услышанного заводится только если задан
+        # каталог (см. `bot.speech_debug` и предупреждение о приватности в
+        # README): по умолчанию её нет вовсе, а не «есть, но выключена».
+        self._recorder = (
+            SpeechRecorder(
+                config.speech_debug_dir, max_seconds=config.speech_debug_max_seconds
+            )
+            if config.speech_debug_dir
+            else None
+        )
+        self._listener = GuildListener(
+            recognizer=self._recognizer,
+            on_phrase=self._handle_phrase,
+            recorder=self._recorder,
+        )
         self._model_unavailable_logged = False
         self._speech_disabled = False
         # Ссылки на фоновые задачи обработки фраз — см. докстринг `_handle_phrase`
@@ -91,8 +107,16 @@ class VoiceControlCog(commands.Cog, name="Голосовое управлени�
         self._music_cog = music_cog
 
     async def cog_unload(self) -> None:
-        """Останавливает приём голоса и освобождает модель распознавания при выгрузке кога."""
+        """Останавливает приём голоса, отладочную запись и фоновые задачи при выгрузке кога."""
         await self._listener.detach()
+        for task in list(self._background_tasks):
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        self._background_tasks.clear()
+        if self._recorder is not None:
+            await self._recorder.close()
         await self._recognizer.close()
 
     async def on_player_voice_connected(self, voice_client: voice_recv.VoiceRecvClient) -> None:
@@ -110,6 +134,8 @@ class VoiceControlCog(commands.Cog, name="Голосовое управлени�
             return
         try:
             await self._listener.attach(voice_client)
+            if self._recorder is not None:
+                await self._recorder.start()
         except SpeechModelUnavailableError as exc:
             if not self._model_unavailable_logged:
                 logger.warning(
@@ -121,6 +147,11 @@ class VoiceControlCog(commands.Cog, name="Голосовое управлени�
     async def on_player_voice_disconnected(self) -> None:
         """Хук `GuildPlayer.on_voice_disconnected`: отключает распознавание перед разрывом связи."""
         await self._listener.detach()
+        if self._recorder is not None:
+            # Запись закрывается здесь, а не при выгрузке кога: именно
+            # сейчас файлы дописываются и появляется итог по потерям —
+            # иначе разбирать сеанс пришлось бы только после остановки бота.
+            await self._recorder.close()
 
     def _resolve_speaker(self, speaker_id: int) -> discord.Member | None:
         """Определяет участника-говорящего по его id через голосовой канал прослушивания."""
