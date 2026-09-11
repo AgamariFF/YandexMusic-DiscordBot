@@ -10,13 +10,12 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
-from bot.cogs.listen import ListenCog
 from bot.cogs.music import MusicCog
 from bot.cogs.roulette import RouletteCog
+from bot.cogs.voice_control import VoiceControlCog
 from bot.config import Config, load_config
 from bot.errors import ConfigError, YandexAuthError
 from bot.logging_setup import setup_logging
-from bot.roulette import GuildRoulette
 from bot.voice_dave import diagnostics_enabled
 from bot.yandex import YandexMusicClient
 
@@ -49,39 +48,63 @@ class WaveBot(commands.Bot):
             return
         self._yandex_client = client
 
-        music_cog = MusicCog(self, self._config, client)
+        # VoiceControlCog создаётся раньше MusicCog и без него: его хуки
+        # (`on_player_voice_connected`/`on_player_voice_disconnected`) нужно
+        # передать в конструктор GuildPlayer уже при создании MusicCog, а
+        # сам MusicCog для их вызова (execute_voice_command) он получит чуть
+        # позже, через bind_music_cog — см. докстринг VoiceControlCog.
+        voice_control_cog: VoiceControlCog | None = None
+        if self._config.speech_enabled:
+            voice_control_cog = VoiceControlCog(self, self._config)
+
+        music_cog = MusicCog(
+            self,
+            self._config,
+            client,
+            on_voice_connected=(
+                voice_control_cog.on_player_voice_connected if voice_control_cog else None
+            ),
+            on_voice_disconnected=(
+                voice_control_cog.on_player_voice_disconnected if voice_control_cog else None
+            ),
+        )
         await self.add_cog(music_cog)
 
-        roulette: GuildRoulette | None = None
+        if voice_control_cog is not None:
+            voice_control_cog.bind_music_cog(music_cog)
+            await self.add_cog(voice_control_cog)
+            # Path.is_dir() — блокирующий вызов файловой системы; сам по себе
+            # он почти мгновенный (это не загрузка модели, только проверка
+            # существования каталога), но в корутине event loop даже такой
+            # быстрый блокирующий вызов лучше не делать напрямую — уносим в поток.
+            speech_model_found = await asyncio.to_thread(
+                Path(self._config.speech_model_path).is_dir
+            )
+            if speech_model_found:
+                logger.info(
+                    "Распознавание речи и голосовые команды включены (SPEECH_ENABLED), модель: %s",
+                    self._config.speech_model_path,
+                )
+            else:
+                logger.warning(
+                    "Модель распознавания речи не найдена по пути %s — голосовое управление "
+                    "отключится при первом же подключении к голосовому каналу, пока модель не "
+                    "будет скачана (см. README).",
+                    self._config.speech_model_path,
+                )
+        else:
+            logger.info(
+                "SPEECH_ENABLED=0 — распознавание речи и голосовые команды отключены."
+            )
+
         if self._config.nekto_token:
             roulette_cog = RouletteCog(self, self._config, music_cog.player)
             await self.add_cog(roulette_cog)
-            roulette = roulette_cog.roulette
             logger.info("Чат-рулетка включена.")
         else:
             logger.info(
                 "NEKTO_TOKEN не задан — команды чат-рулетки отключены, "
                 "остальной функционал бота не затронут."
-            )
-
-        await self.add_cog(ListenCog(self, self._config, music_cog.player, roulette))
-        # Path.is_dir() — блокирующий вызов файловой системы; сам по себе он
-        # почти мгновенный (это не загрузка модели, только проверка
-        # существования каталога), но в корутине event loop даже такой
-        # быстрый блокирующий вызов лучше не делать напрямую — уносим в поток.
-        speech_model_found = await asyncio.to_thread(
-            Path(self._config.speech_model_path).is_dir
-        )
-        if speech_model_found:
-            logger.info(
-                "Распознавание речи включено (команды /listen, /listen_stop), модель: %s",
-                self._config.speech_model_path,
-            )
-        else:
-            logger.warning(
-                "Модель распознавания речи не найдена по пути %s — команда /listen ответит "
-                "понятной ошибкой, пока модель не будет скачана (см. README).",
-                self._config.speech_model_path,
             )
 
         if diagnostics_enabled():

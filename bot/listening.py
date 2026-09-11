@@ -1,24 +1,27 @@
 """Голосовое прослушивание (Discord-слой) поверх `bot.speech.SpeechRecognizer`.
 
 `GuildListener` — Discord-обвязка вокруг `SpeechRecognizer` (см. её
-докстринг): держит собственное голосовое соединение гильдии
-(`discord.ext.voice_recv.VoiceRecvClient`, а не обычный `discord.VoiceClient`
-— обычный умеет только отправлять звук, здесь же нужен приём, как и у
-`bot.roulette.GuildRoulette`) и мост звука в одну сторону — из Discord в
-распознавание. В обратную сторону (бот что-то говорит) прослушиванию
-отправлять нечего, поэтому, в отличие от `GuildRoulette`, здесь нет ни
-исходящего аудиоисточника, ни `voice_client.play(...)`.
+докстринг): мост звука в одну сторону — из Discord в распознавание. В
+обратную сторону (бот что-то говорит) прослушиванию отправлять нечего,
+поэтому, в отличие от `bot.roulette.GuildRoulette`, здесь нет ни исходящего
+аудиоисточника, ни `voice_client.play(...)`.
 
-Взаимоисключение с `bot.player.GuildPlayer` и `bot.roulette.GuildRoulette`
-(все три делят одно голосовое соединение гильдии — Discord не даёт открыть
-второе, пока активно первое) реализовано только в одну сторону — забота
-вызывающего кода: запуск прослушивания сначала принудительно останавливает
-и волну, и чат-рулетку (см. докстринг `bot.cogs.listen.ListenCog`).
-Обратной защиты нет: попытка запустить волну или рулетку поверх уже
-идущего прослушивания просто упадёт с `VoiceConnectError`, потому что
-Discord не даёт открыть второе голосовое соединение гильдии, — то же самое
-временное ограничение и по той же причине, что уже описано в докстринге
-`bot.roulette`.
+Своего голосового соединения у прослушивания нет — Discord даёт гильдии
+ровно одно голосовое соединение, и его открывает и закрывает
+`bot.player.GuildPlayer`. `GuildListener` лишь подключается к уже открытому
+соединению плеера (`attach`/`detach`, см. их докстринги) и делит его через
+`discord.ext.voice_recv.VoiceRecvClient` — подкласс обычного `VoiceClient`,
+который умеет `play()` (им пользуется плеер) и `listen()` (им пользуется
+прослушивание) одновременно на одном и том же соединении. Раздельные
+`stop_playing()`/`stop_listening()` этого класса гарантируют, что смена
+трека не обрывает приём голоса, а остановка распознавания — воспроизведение
+(подробнее — в докстринге `GuildPlayer._stop_playback_locked` и `detach`).
+
+Чат-рулетка (`bot.roulette.GuildRoulette`) в эту схему не входит: она
+по-прежнему держит своё отдельное голосовое соединение гильдии и потому
+остаётся несовместимой и с плеером, и с прослушиванием — Discord не даёт
+открыть второе соединение гильдии, пока активно первое (см. докстринг
+`bot.cogs.voice_control.VoiceControlCog` про то, как это обрабатывается).
 """
 
 from __future__ import annotations
@@ -33,7 +36,6 @@ import av
 import discord
 from discord.ext import voice_recv
 
-from bot.errors import VoiceConnectError
 from bot.nekto.audio import DISCORD_CHANNELS, DISCORD_SAMPLE_RATE, DISCORD_SAMPLE_WIDTH
 from bot.speech import SAMPLE_RATE, SpeechRecognizer
 from bot.voice_dave import install_dave_decryption
@@ -127,13 +129,14 @@ class _DiscordToSpeechSink(voice_recv.AudioSink):
 
 
 class GuildListener:
-    """Управляет голосовым прослушиванием одного сервера: соединение и мост звука в распознавание.
+    """Управляет распознаванием речи сервера: приём звука на чужом соединении, мост в распознавание.
 
     Один экземпляр на сервер, по образцу `GuildPlayer`/`GuildRoulette`: свой
-    лок на операции с соединением и по одной фоновой задаче на каждого
+    лок на операции с приёмом и по одной фоновой задаче на каждого
     говорящего (см. `_pump_speaker`), а не одна общая — у каждого своя
     очередь кадров и свой ресемплер (об этом подробнее в докстринге
-    `_pump_speaker`).
+    `_pump_speaker`). В отличие от них, собственного голосового соединения
+    у этого класса нет — см. модульный докстринг.
     """
 
     def __init__(
@@ -144,7 +147,8 @@ class GuildListener:
     ) -> None:
         """Запоминает распознаватель речи и колбэк на распознанную фразу.
 
-        Само соединение открывает `start()` — конструктор сети не касается.
+        К уже открытому чужому соединению подключает `attach()` —
+        конструктор сети не касается.
         """
         self._recognizer = recognizer
         self._on_phrase = on_phrase
@@ -153,94 +157,81 @@ class GuildListener:
         self._loop: asyncio.AbstractEventLoop | None = None
 
         self._voice_client: voice_recv.VoiceRecvClient | None = None
-        self._channel: discord.VoiceChannel | discord.StageChannel | None = None
 
         self._queues: dict[int, asyncio.Queue[av.AudioFrame]] = {}
         self._pump_tasks: dict[int, asyncio.Task[None]] = {}
 
     @property
     def is_active(self) -> bool:
-        """Признак того, что прослушивание сейчас запущено (есть голосовое соединение)."""
+        """Признак того, что прослушивание сейчас подключено к чьему-то голосовому соединению."""
         return self._voice_client is not None
 
     @property
     def channel(self) -> discord.VoiceChannel | discord.StageChannel | None:
-        """Голосовой канал, к которому подключено прослушивание, либо None."""
-        return self._channel
+        """Голосовой канал, к которому подключено прослушивание, либо None.
 
-    async def start(self, channel: discord.VoiceChannel | discord.StageChannel) -> None:
-        """Загружает модель речи (если ещё не загружена), подключается к каналу и начинает слушать.
+        Читается напрямую из `voice_client.channel`, а не хранится своим
+        полем: соединением владеет `GuildPlayer`, и если он перейдёт в
+        другой канал (`move_to`), актуальный канал должен быть виден отсюда
+        без отдельной синхронизации.
+        """
+        if self._voice_client is None:
+            return None
+        return self._voice_client.channel
 
-        Идемпотентен по подключению: повторный вызов для того же канала при
-        уже запущенном прослушивании — no-op, для другого канала —
-        переподключение (`move_to`). `ensure_ready()` вызывается ДО
-        подключения к голосу намеренно: если модели нет на диске, лучше
-        сразу понятная ошибка (`SpeechModelUnavailableError`, см.
-        `bot.speech`), чем открытое голосовое соединение без единого шанса
-        хоть что-то распознать.
+    async def attach(self, voice_client: voice_recv.VoiceRecvClient) -> None:
+        """Загружает модель речи (если ещё не загружена) и слушает переданное соединение.
+
+        Соединение уже открыто и принадлежит вызывающему коду (см.
+        модульный докстринг) — этот метод только вешает на него приём
+        звука, ничего не подключая и не отключая сам. Идемпотентен: повторный
+        вызов с тем же самым соединением — no-op, с другим — сначала снимает
+        приём со старого (`_detach_locked`), затем вешает на новое.
+        `ensure_ready()` вызывается ДО захвата лока и ДО правки соединения
+        намеренно: если модели нет на диске, лучше сразу понятная ошибка
+        (`SpeechModelUnavailableError`, см. `bot.speech`), чем наполовину
+        подключённое прослушивание.
         """
         await self._recognizer.ensure_ready()
         self._loop = asyncio.get_running_loop()
         async with self._lock:
-            if self._voice_client is not None and self._voice_client.is_connected():
-                current_channel = self._voice_client.channel
-                if current_channel is None or current_channel.id != channel.id:
-                    await self._voice_client.move_to(channel)
-                self._channel = channel
+            if self._voice_client is voice_client:
                 return
-            self._voice_client = await self._connect_voice_locked(channel)
-            self._voice_client.listen(_DiscordToSpeechSink(self))
+            if self._voice_client is not None:
+                await self._detach_locked()
+            voice_client.listen(_DiscordToSpeechSink(self))
             # Discord требует DAVE (сквозное шифрование) на этом канале —
             # тот же приём, что и у чат-рулетки, подробности см. докстринг
-            # bot.voice_dave.
-            install_dave_decryption(self._voice_client)
-            self._channel = channel
+            # bot.voice_dave. install_dave_decryption работает с читателем,
+            # который появляется только после listen() — порядок принципиален.
+            install_dave_decryption(voice_client)
+            self._voice_client = voice_client
 
-    async def _connect_voice_locked(
-        self, channel: discord.VoiceChannel | discord.StageChannel
-    ) -> voice_recv.VoiceRecvClient:
-        """Открывает голосовое соединение с приёмом звука, переводя ошибки в `VoiceConnectError`."""
-        try:
-            return await channel.connect(cls=voice_recv.VoiceRecvClient)
-        except (
-            TimeoutError,
-            discord.ClientException,
-            discord.opus.OpusNotLoaded,
-            RuntimeError,
-        ) as exc:
-            raise VoiceConnectError(
-                f"Не удалось подключиться к голосовому каналу {channel.id}: {exc}",
-                user_message="Не удалось подключиться к голосовому каналу.",
-            ) from exc
+    async def detach(self) -> None:
+        """Останавливает приём звука, не трогая само голосовое соединение. Идемпотентен.
 
-    async def stop(self) -> None:
-        """Останавливает прослушивание, отключается от канала. Идемпотентен.
-
-        Не бросает исключений, даже если прослушивание уже не было
-        запущено — команда /listen_stop должна молча срабатывать в любом
-        состоянии, а не требовать от пользователя знать текущее.
+        Не бросает исключений ни в каком состоянии, даже если прослушивание
+        уже не было подключено: вызывается из хука отключения плеера (см.
+        `bot.cogs.voice_control.VoiceControlCog`) и не должна мешать
+        отключению плеера от голосового канала. Останавливает именно
+        `voice_client.stop_listening()`, а не `stop()` — `stop()` на
+        `VoiceRecvClient` обрывает заодно и воспроизведение музыки, которым
+        распознавание не владеет (см. докстринг `GuildPlayer._stop_playback_locked`).
         """
         async with self._lock:
-            await self._teardown_locked()
+            await self._detach_locked()
 
-    async def _teardown_locked(self) -> None:
-        """Останавливает фоновые задачи всех говорящих и рвёт голосовое соединение."""
+    async def _detach_locked(self) -> None:
+        """Останавливает фоновые задачи всех говорящих и снимает приём звука с соединения."""
         for speaker_id in list(self._pump_tasks):
             await self._drop_speaker_locked(speaker_id)
 
         if self._voice_client is not None:
             try:
-                self._voice_client.stop()  # прекращает listen()
+                self._voice_client.stop_listening()
             except Exception:
                 logger.warning("Ошибка при остановке приёма голоса прослушивания", exc_info=True)
-            try:
-                await self._voice_client.disconnect(force=True)
-            except Exception:
-                logger.warning(
-                    "Ошибка при отключении голосового канала прослушивания", exc_info=True
-                )
         self._voice_client = None
-        self._channel = None
 
     def drop_speaker(self, speaker_id: int) -> None:
         """Убирает состояние говорящего, покинувшего голосовой канал — не дожидаясь таймаута.
@@ -249,8 +240,8 @@ class GuildListener:
         говорящего и освобождение его распознавателя планируются отдельной
         задачей на потоке event loop. Вызывать нужно из потока event loop
         (например, из обработчика `on_voice_state_update`, см.
-        `bot.cogs.listen.ListenCog`) — метод не потокобезопасен, в отличие
-        от `_forward_from_discord_threadsafe`.
+        `bot.cogs.voice_control.VoiceControlCog`) — метод не потокобезопасен,
+        в отличие от `_forward_from_discord_threadsafe`.
         """
         loop = self._loop
         if loop is None:

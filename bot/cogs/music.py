@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, voice_recv
 
 from bot.audio.bassboost import BassLevel
 from bot.cogs.player_view import PlayerView
@@ -15,6 +16,7 @@ from bot.cogs.views import MAX_SEARCH_RESULTS, TrackSearchView, build_search_emb
 from bot.config import Config
 from bot.errors import BotError, NothingPlayingError, NotInVoiceChannelError
 from bot.player import GuildPlayer, PlayerState
+from bot.voice_commands import VoiceCommand
 from bot.yandex import TrackInfo, YandexMusicClient
 
 logger = logging.getLogger(__name__)
@@ -100,8 +102,24 @@ def _voice_channel_of(
 class MusicCog(commands.Cog, name="Музыка"):
     """Slash-команды управления «Моей волной»."""
 
-    def __init__(self, bot: commands.Bot, config: Config, client: YandexMusicClient) -> None:
-        """Создаёт единственный GuildPlayer, обслуживающий сервер бота."""
+    def __init__(
+        self,
+        bot: commands.Bot,
+        config: Config,
+        client: YandexMusicClient,
+        *,
+        on_voice_connected: Callable[[voice_recv.VoiceRecvClient], Awaitable[None]] | None = None,
+        on_voice_disconnected: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Создаёт единственный GuildPlayer, обслуживающий сервер бота.
+
+        `on_voice_connected`/`on_voice_disconnected` пробрасываются прямо в
+        `GuildPlayer` — этот ког лишь передаточное звено между
+        `bot/__main__.py` (где создаётся `bot.cogs.voice_control.VoiceControlCog`
+        и его хуки) и конструктором плеера, у которого голосовое соединение
+        открывается и закрывается на самом деле. Подробности — в докстринге
+        `GuildPlayer.__init__`.
+        """
         self._bot = bot
         self._config = config
         self._client = client
@@ -121,12 +139,25 @@ class MusicCog(commands.Cog, name="Музыка"):
             idle_timeout=config.idle_timeout,
             announce=self._announce,
             on_stopped=self._handle_stopped,
+            on_voice_connected=on_voice_connected,
+            on_voice_disconnected=on_voice_disconnected,
         )
 
     @property
     def player(self) -> GuildPlayer:
         """Единственный проигрыватель волны, обслуживающий сервер бота."""
         return self._player
+
+    @property
+    def announce_channel(self) -> discord.abc.Messageable | None:
+        """Текстовый канал последнего запуска волны/подключения, либо None.
+
+        Нужен `bot.cogs.voice_control.VoiceControlCog`: у голосовых команд
+        нет своего текстового канала (в отличие от slash-команд с их
+        `interaction.channel`), транскрипты и подтверждения голосовых
+        команд идут туда же, куда обычно уходят объявления о новом треке.
+        """
+        return self._announce_channel
 
     async def cog_unload(self) -> None:
         """Останавливает текущий PlayerView и отключает плеер при выгрузке кога."""
@@ -463,6 +494,10 @@ class MusicCog(commands.Cog, name="Музыка"):
         await self._player.start_wave_from_track(track)
         await self._send_started_ack(interaction)
 
+    async def _search_tracks(self, query: str) -> list[TrackInfo]:
+        """Ищет треки — общая часть /search, модального окна поиска и голосовых команд."""
+        return await self._client.search_tracks(query, limit=MAX_SEARCH_RESULTS)
+
     async def _search_and_start(self, interaction: discord.Interaction, query: str) -> None:
         """Ищет треки и либо сразу запускает волну, либо показывает меню выбора.
 
@@ -471,7 +506,7 @@ class MusicCog(commands.Cog, name="Музыка"):
         Требует, чтобы `interaction.response` был уже отложен (`defer`)
         вызывающим кодом.
         """
-        tracks = await self._client.search_tracks(query, limit=MAX_SEARCH_RESULTS)
+        tracks = await self._search_tracks(query)
 
         if not tracks:
             await interaction.followup.send(
@@ -502,6 +537,135 @@ class MusicCog(commands.Cog, name="Музыка"):
             wait=True,
         )
         view.attach_message(message)
+
+    # --- Голосовые команды («Катя …», см. bot.voice_commands) --------------
+    # Диспетчеризация живёт здесь, а не в bot.cogs.voice_control.VoiceControlCog:
+    # этот ког уже владеет и плеером, и сообщением-плеером, и существующими
+    # путями поиска/запуска волны, переиспользуемыми и голосовыми командами.
+
+    _VOICE_COMMANDS_UPDATE_PLAYER_MESSAGE = frozenset(
+        {"pause", "resume", "skip", "stop", "wave", "search", "volume"}
+    )
+
+    async def execute_voice_command(
+        self, command: VoiceCommand, speaker: discord.Member | None
+    ) -> str:
+        """Выполняет голосовую команду «Катя …» и возвращает короткий текст-подтверждение.
+
+        Доменные ошибки (`bot.errors.BotError`, например `NothingPlayingError`
+        на «пауза», когда ничего не играет) перехватываются здесь и
+        превращаются в их же `user_message` — голосовая команда не должна
+        ронять распознавание речи исключением. После любого действия,
+        меняющего состояние плеера (`_VOICE_COMMANDS_UPDATE_PLAYER_MESSAGE`),
+        сообщение-плеер обновляется тем же `_update_player_message()`, что и
+        кнопки/slash-команды, только без интеракции — её у голосовой команды
+        нет.
+        """
+        try:
+            reply = await self._dispatch_voice_command(command, speaker)
+        except BotError as exc:
+            logger.warning("Ошибка голосовой команды %s: %s", command.action, exc)
+            return exc.user_message
+        if command.action in self._VOICE_COMMANDS_UPDATE_PLAYER_MESSAGE:
+            await self._update_player_message()
+        return reply
+
+    async def _dispatch_voice_command(
+        self, command: VoiceCommand, speaker: discord.Member | None
+    ) -> str:
+        """Сопоставляет действие голосовой команды с уже существующим API `GuildPlayer`."""
+        if command.action == "pause":
+            self._player.pause()
+            return "Воспроизведение приостановлено."
+        if command.action == "resume":
+            self._player.resume()
+            return "Воспроизведение возобновлено."
+        if command.action == "skip":
+            next_track = await self._player.skip()
+            if next_track is None:
+                return "Трек пропущен."
+            return f"Трек пропущен. Далее: {next_track.display}"
+        if command.action == "stop":
+            await self._player.disconnect()
+            return "Отключился от голосового канала."
+        if command.action == "wave":
+            if command.query is None:
+                error = await self._connect_for_speaker(speaker)
+                if error is not None:
+                    return error
+                await self._player.start_wave()
+                return "«Моя волна» запущена."
+            return await self._search_and_start_wave_voice(command.query, speaker)
+        if command.action == "search":
+            return await self._search_and_start_wave_voice(command.query or "", speaker)
+        if command.action == "volume":
+            return self._apply_voice_volume(command)
+        if command.action == "now_playing":
+            info = self._player.now_playing()
+            elapsed = format_duration(info.elapsed)
+            total = format_duration(info.track.duration)
+            return f"Сейчас играет: {info.track.display} ({elapsed} / {total})."
+        raise AssertionError(f"Неизвестное действие голосовой команды: {command.action}")
+
+    async def _search_and_start_wave_voice(
+        self, query: str, speaker: discord.Member | None
+    ) -> str:
+        """Общая часть действий `search` и `wave` (с query): ищет трек и запускает волну от него.
+
+        Голосовой аналог `_search_and_start`/`_start_wave_from_track`, но
+        без интеракции: `search` и `wave` с заданным треком/исполнителем
+        (`command.query`) делают одно и то же — находят трек и запускают
+        волну от него.
+        """
+        track = await self._resolve_search_track(query)
+        if track is None:
+            return f"Ничего не найдено по запросу «{query}»."
+        error = await self._connect_for_speaker(speaker)
+        if error is not None:
+            return error
+        await self._player.start_wave_from_track(track)
+        return f"«Моя волна» по {track.artists} — {track.title} запущена."
+
+    async def _resolve_search_track(self, query: str) -> TrackInfo | None:
+        """Ищет треки по запросу и возвращает самый подходящий, либо None, если ничего не нашлось.
+
+        У голосовых команд нет интеракции, к которой можно привязать меню
+        выбора из нескольких найденных треков (см. `TrackSearchView`),
+        поэтому при нескольких результатах просто берётся первый — тот же
+        трек, что стал бы единственным пунктом меню.
+        """
+        tracks = await self._search_tracks(query)
+        return tracks[0] if tracks else None
+
+    async def _connect_for_speaker(self, speaker: discord.Member | None) -> str | None:
+        """Подключается к каналу говорящего для голосовой команды, если плеер ещё не в канале.
+
+        Голосовой аналог `_ensure_connected(interaction)`: там канал берётся
+        из `interaction.user`, здесь — из `speaker`, единственного
+        "заявителя" фразы, которого знает вызывающий код (см.
+        `bot.cogs.voice_control.VoiceControlCog._resolve_speaker`). В отличие
+        от `_ensure_connected`, `self._announce_channel` не трогается — у
+        голосовой команды нет своего текстового канала (см.
+        `bot.cogs.voice_control.VoiceControlCog._target_channel`),
+        устанавливать его как канал объявлений было бы неверно. Возвращает
+        текст ошибки, если подключиться невозможно, иначе None.
+        """
+        if self._player.voice_client is not None:
+            return None
+        if speaker is None or speaker.voice is None or speaker.voice.channel is None:
+            return "Не могу подключиться: вы должны находиться в голосовом канале."
+        await self._player.connect(speaker.voice.channel)
+        return None
+
+    def _apply_voice_volume(self, command: VoiceCommand) -> str:
+        """Применяет абсолютную либо относительную громкость голосовой команды `volume`."""
+        if command.volume_percent is not None:
+            new_volume = self._player.set_volume(command.volume_percent / 100)
+        elif command.volume_delta is not None:
+            new_volume = self._player.set_volume(self._player.volume + command.volume_delta / 100)
+        else:
+            return f"Текущая громкость: {round(self._player.volume * 100)}%."
+        return f"Громкость установлена: {round(new_volume * 100)}%."
 
     @app_commands.command(name="join", description="Подключиться к голосовому каналу")
     @app_commands.guild_only()

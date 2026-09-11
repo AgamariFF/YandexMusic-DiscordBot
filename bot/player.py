@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 import discord
+from discord.ext import voice_recv
 
 from bot.audio import BassLevel, TrackedAudioSource, create_source
 from bot.errors import (
@@ -62,6 +63,8 @@ class GuildPlayer:
         idle_timeout: int = 300,
         announce: Callable[[TrackInfo, str | None], Awaitable[None]] | None = None,
         on_stopped: Callable[[], Awaitable[None]] | None = None,
+        on_voice_connected: Callable[[voice_recv.VoiceRecvClient], Awaitable[None]] | None = None,
+        on_voice_disconnected: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Создаёт плеер сервера с заданными настройками звука и оповещений.
 
@@ -70,6 +73,19 @@ class GuildPlayer:
         волны из активного состояния в остановленное — независимо от
         причины (кончились треки, `disconnect()` и т.д.). Подробности и
         гарантия однократности — в докстринге `_stop_locked_state`.
+
+        `on_voice_connected`/`on_voice_disconnected` — необязательная пара
+        колбэков вокруг жизни голосового соединения, а не воспроизведения:
+        первый срабатывает в `connect()` сразу после успешного подключения
+        (в том числе и после `move_to` в другой канал), второй — в
+        `disconnect()` непосредственно перед разрывом уже установленного
+        соединения. Они существуют для `bot.cogs.voice_control.VoiceControlCog`
+        — соединение открывает и закрывает плеер, а распознавание речи живёт
+        на том же самом соединении (`discord.ext.voice_recv.VoiceRecvClient`
+        умеет и `play()`, и `listen()` одновременно), поэтому ему нужно
+        знать о появлении и исчезновении соединения, не открывая своего.
+        Как и `announce`/`on_stopped`, исключение колбэка не должно ронять
+        подключение/отключение плеера — оно логируется и проглатывается.
         """
         self._client = client
         self._ffmpeg_path = ffmpeg_path
@@ -78,11 +94,13 @@ class GuildPlayer:
         self._idle_timeout = idle_timeout
         self._announce = announce
         self._on_stopped = on_stopped
+        self._on_voice_connected = on_voice_connected
+        self._on_voice_disconnected = on_voice_disconnected
 
         self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
 
-        self._voice_client: discord.VoiceClient | None = None
+        self._voice_client: voice_recv.VoiceRecvClient | None = None
         self._channel: discord.VoiceChannel | discord.StageChannel | None = None
         self._session: WaveSession | None = None
         self._current_track: TrackInfo | None = None
@@ -115,8 +133,17 @@ class GuildPlayer:
         return self._bass
 
     @property
-    def voice_client(self) -> discord.VoiceClient | None:
-        """Активное голосовое соединение сервера либо None."""
+    def voice_client(self) -> voice_recv.VoiceRecvClient | None:
+        """Активное голосовое соединение сервера либо None.
+
+        Тип — `VoiceRecvClient` (подкласс обычного `discord.VoiceClient` с
+        добавленным приёмом звука), а не просто `VoiceClient`: соединение
+        должно уметь и `play()`, и `listen()` одновременно, потому что на
+        нём же может жить распознавание речи (см. докстринг `__init__` про
+        `on_voice_connected`). Для остального кода это прозрачно — весь
+        обычный API `VoiceClient` (`play`, `pause`, `is_playing` и т.д.)
+        доступен как раньше.
+        """
         return self._voice_client
 
     @property
@@ -130,14 +157,24 @@ class GuildPlayer:
         return self._session.description if self._session is not None else None
 
     async def connect(self, channel: discord.VoiceChannel | discord.StageChannel) -> None:
-        """Подключается к каналу либо переходит в него, если уже подключён к другому."""
+        """Подключается к каналу либо переходит в него, если уже подключён к другому.
+
+        Подключается через `cls=voice_recv.VoiceRecvClient` — не потому,
+        что плееру самому нужен приём звука, а потому, что распознавание
+        речи (`bot.cogs.voice_control.VoiceControlCog`) делит с плеером
+        одно и то же голосовое соединение гильдии (Discord не даёт открыть
+        второе) и должно иметь возможность слушать на нём же. `on_voice_connected`
+        вызывается уже вне `self._lock`, чтобы колбэк (может включать
+        загрузку модели распознавания при первом подключении) не держал
+        лок плеера и не блокировал остальные его операции.
+        """
         self._loop = asyncio.get_running_loop()
         async with self._lock:
             try:
                 if self._voice_client is not None and self._voice_client.is_connected():
                     await self._voice_client.move_to(channel)
                 else:
-                    self._voice_client = await channel.connect()
+                    self._voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
             # discord.py сигнализирует отсутствие PyNaCl (без него голос не работает)
             # голым RuntimeError, а не своим типом исключения — перехватываем и его.
             except (
@@ -153,6 +190,12 @@ class GuildPlayer:
             self._channel = channel
             self._restart_idle_timer_locked()
 
+        if self._on_voice_connected is not None:
+            try:
+                await self._on_voice_connected(self._voice_client)
+            except Exception:
+                logger.exception("Ошибка в колбэке подключения голосового соединения")
+
     async def disconnect(self) -> None:
         """Отключается от голосового канала и сбрасывает состояние. Идемпотентен."""
         async with self._lock:
@@ -166,6 +209,14 @@ class GuildPlayer:
             await self._stop_locked_state()
             self._consecutive_failures = 0
             if self._voice_client is not None:
+                if self._on_voice_disconnected is not None:
+                    # До разрыва соединения — распознаванию ещё есть с чего
+                    # снимать `listen()` (см. докстринг __init__ про
+                    # on_voice_connected/on_voice_disconnected).
+                    try:
+                        await self._on_voice_disconnected()
+                    except Exception:
+                        logger.exception("Ошибка в колбэке отключения голосового соединения")
                 try:
                     await self._voice_client.disconnect(force=True)
                 except Exception:
@@ -461,16 +512,21 @@ class GuildPlayer:
     def _stop_playback_locked(self) -> None:
         """Останавливает активное воспроизведение и снимает identity текущего источника.
 
-        Сброс `self._source` до вызова `stop()` гарантирует, что колбэк, который
-        придёт по уже остановленному источнику, распознает себя как чужой
-        (identity-проверка в `_handle_playback_finished`) и не продвинет очередь
-        повторно.
+        Сброс `self._source` до вызова `stop_playing()` гарантирует, что
+        колбэк, который придёт по уже остановленному источнику, распознает
+        себя как чужой (identity-проверка в `_handle_playback_finished`) и
+        не продвинет очередь повторно.
+
+        Вызывается именно `stop_playing()`, а не `stop()`: на `VoiceRecvClient`
+        (см. `connect()`) `stop()` останавливает разом и воспроизведение, и
+        приём звука (`stop()` = `stop_playing()` + `stop_listening()`), а
+        приём — не забота плеера и не должен обрываться сменой трека.
         """
         if self._voice_client is None:
             return
         self._source = None
         if self._voice_client.is_playing() or self._voice_client.is_paused():
-            self._voice_client.stop()
+            self._voice_client.stop_playing()
 
     async def _stop_locked_state(self) -> None:
         """Сбрасывает состояние воспроизведения и волну, не трогая голосовое соединение.

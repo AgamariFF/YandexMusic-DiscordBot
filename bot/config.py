@@ -17,6 +17,11 @@ _DEFAULT_FFMPEG_PATH = "ffmpeg"
 _DEFAULT_IDLE_TIMEOUT = 300
 _DEFAULT_SPEECH_MODEL_PATH = "models/vosk-model-small-ru-0.22"
 
+# Значения переменных окружения, считающиеся истиной для булевых флагов —
+# тот же набор, что и у VOICE_RECV_DIAG (см. bot.voice_dave.diagnostics_enabled),
+# ради единообразия разбора булевых настроек по всему проекту.
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
 
 @dataclass(frozen=True, slots=True)
 class Config:
@@ -32,6 +37,8 @@ class Config:
     nekto_token: str
     nekto_user_agent: str
     speech_model_path: str
+    speech_enabled: bool
+    speech_transcript: bool
 
     @property
     def secrets(self) -> tuple[str, ...]:
@@ -39,6 +46,19 @@ class Config:
         return tuple(
             value for value in (self.discord_token, self.yandex_token, self.nekto_token) if value
         )
+
+
+def _parse_bool_env(name: str, *, default: bool) -> bool:
+    """Разбирает булеву переменную окружения: 1/true/yes/on без учёта регистра — истина.
+
+    Пустая или отсутствующая переменная — `default`; любое другое значение
+    (`0`, `false`, `no`, опечатка) — ложь. Общий разбор для `SPEECH_ENABLED`
+    и `SPEECH_TRANSCRIPT`, чтобы не дублировать один и тот же код разбора.
+    """
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in _TRUE_VALUES
 
 
 def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
@@ -129,6 +149,16 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
         os.environ.get("SPEECH_MODEL_PATH", "").strip() or _DEFAULT_SPEECH_MODEL_PATH
     )
 
+    # Распознавание речи включено по умолчанию — выключается явно, если
+    # владелец сервера не хочет постоянного прослушивания голосовых каналов
+    # (см. README, предупреждение о приватности в разделе 7).
+    speech_enabled = _parse_bool_env("SPEECH_ENABLED", default=True)
+    # А вот отладочная публикация каждой распознанной фразы в текстовый
+    # канал — наоборот, выключена по умолчанию: не всем нужен такой поток
+    # сообщений, и без явного включения это была бы скрытая утечка чужих
+    # разговоров в чат.
+    speech_transcript = _parse_bool_env("SPEECH_TRANSCRIPT", default=False)
+
     return Config(
         discord_token=discord_token,
         guild_id=guild_id,
@@ -140,4 +170,6 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
         nekto_token=nekto_token,
         nekto_user_agent=nekto_user_agent,
         speech_model_path=speech_model_path,
+        speech_enabled=speech_enabled,
+        speech_transcript=speech_transcript,
     )
