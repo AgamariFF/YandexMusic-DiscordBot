@@ -36,7 +36,12 @@ import av
 import discord
 from discord.ext import voice_recv
 
-from bot.nekto.audio import DISCORD_CHANNELS, DISCORD_SAMPLE_RATE, DISCORD_SAMPLE_WIDTH
+from bot.nekto.audio import (
+    DISCORD_CHANNELS,
+    DISCORD_SAMPLE_RATE,
+    DISCORD_SAMPLE_WIDTH,
+    frame_to_pcm,
+)
 from bot.speech import SAMPLE_RATE, SpeechRecognizer
 from bot.speech_debug import SpeechRecorder
 from bot.voice_dave import install_dave_decryption
@@ -336,7 +341,7 @@ class GuildListener:
         while True:
             frame = await queue.get()
             for resampled in resampler.resample(frame):
-                pcm = bytes(resampled.planes[0])
+                pcm = frame_to_pcm(resampled)
                 if not pcm:
                     continue
                 if self._recorder is not None:

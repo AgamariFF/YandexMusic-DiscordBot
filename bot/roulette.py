@@ -40,6 +40,7 @@ from bot.nekto.audio import (
     DISCORD_SAMPLE_RATE,
     DISCORD_SAMPLE_WIDTH,
     build_discord_resampler,
+    frame_to_pcm,
 )
 from bot.voice_dave import install_dave_decryption
 
@@ -443,7 +444,7 @@ class GuildRoulette:
         while True:
             frame = await session.receive_audio()
             for resampled in resampler.resample(frame):
-                buffer.extend(bytes(resampled.planes[0]))
+                buffer.extend(frame_to_pcm(resampled))
             while len(buffer) >= _FRAME_BYTES:
                 source.push_chunk(bytes(buffer[:_FRAME_BYTES]))
                 del buffer[:_FRAME_BYTES]
