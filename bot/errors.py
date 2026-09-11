@@ -83,3 +83,15 @@ class SpeechModelUnavailableError(BotError):
     """Модель распознавания речи (Vosk) не найдена на диске или не может быть загружена."""
 
     default_message = "Модель распознавания речи недоступна."
+
+
+class SpeechSynthesisUnavailableError(BotError):
+    """Синтез речи недоступен: не установлен пакет, не скачана модель или она не грузится."""
+
+    default_message = "Синтез речи недоступен."
+
+
+class NothingToSayError(BotError):
+    """Команде озвучивания не передали текста, либо он оказался пустым после очистки."""
+
+    default_message = "Нечего произносить: скажите, что повторить."

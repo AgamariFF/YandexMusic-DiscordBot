@@ -14,8 +14,15 @@ from bot.audio.bassboost import BassLevel
 from bot.cogs.player_view import PlayerView
 from bot.cogs.views import MAX_SEARCH_RESULTS, TrackSearchView, build_search_embed
 from bot.config import Config
-from bot.errors import BotError, NothingPlayingError, NotInVoiceChannelError
+from bot.errors import (
+    BotError,
+    NothingPlayingError,
+    NothingToSayError,
+    NotInVoiceChannelError,
+    SpeechSynthesisUnavailableError,
+)
 from bot.player import GuildPlayer, PlayerState
+from bot.tts import MAX_TEXT_LENGTH, TextToSpeech, clean_text
 from bot.voice_commands import VoiceCommand
 from bot.yandex import TrackInfo, YandexMusicClient
 
@@ -124,6 +131,12 @@ class MusicCog(commands.Cog, name="Музыка"):
         self._config = config
         self._client = client
         self._announce_channel: discord.abc.Messageable | None = None
+        # Синтез речи создаётся всегда, но модель грузит только при первой
+        # произнесённой фразе (см. bot.tts) — выключенная настройка просто
+        # не даёт до него дойти.
+        self._tts = TextToSpeech(
+            model_name=config.tts_model_name, speaker_id=config.tts_speaker_id
+        )
         # Единственное сообщение-плеер сервера, его текущий PlayerView и лок,
         # под которым идёт любая правка — подробности см. в докстринге
         # `_update_player_message`. `_player_view` нужен отдельно от
@@ -596,6 +609,12 @@ class MusicCog(commands.Cog, name="Музыка"):
                 await self._player.start_wave()
                 return "«Моя волна» запущена."
             return await self._search_and_start_wave_voice(command.query, speaker)
+        if command.action == "repeat":
+            error = await self._connect_for_speaker(speaker)
+            if error is not None:
+                return error
+            spoken = await self.say_text(command.query or "")
+            return f"Сказала: «{spoken}»"
         if command.action == "search":
             return await self._search_and_start_wave_voice(command.query or "", speaker)
         if command.action == "volume":
@@ -788,6 +807,56 @@ class MusicCog(commands.Cog, name="Музыка"):
         embed.add_field(name="Бас-буст", value=info.bass.label)
         embed.add_field(name="Статус", value="на паузе" if info.paused else "играет")
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="say", description="Произнести фразу голосом бота")
+    @app_commands.describe(text="Что произнести")
+    @app_commands.guild_only()
+    async def say(
+        self,
+        interaction: discord.Interaction,
+        # Ограничение длины прямо в форме Discord: человек упрётся в него
+        # ещё при вводе, а не узнает об обрезке из ответа бота (сам предел
+        # и его обоснование — в `bot.tts.MAX_TEXT_LENGTH`).
+        text: app_commands.Range[str, 1, MAX_TEXT_LENGTH],
+    ) -> None:
+        """Озвучивает фразу в голосовом канале, приостановив музыку на её время."""
+        await interaction.response.defer(ephemeral=True)
+        await self._ensure_connected(interaction)
+        spoken = await self.say_text(text)
+        await interaction.followup.send(
+            f"Произнесено: «{spoken}»",
+            # text — свободный ввод пользователя: без явного none()
+            # упоминание роли или @everyone внутри фразы ушло бы настоящим
+            # пингом от имени бота (см. тот же приём в _search_and_start).
+            allowed_mentions=discord.AllowedMentions.none(),
+            ephemeral=True,
+        )
+
+    async def say_text(self, text: str) -> str:
+        """Синтезирует фразу и произносит её; возвращает то, что было произнесено.
+
+        Общая точка для текстовой команды `/say` и голосовой «Катя, повтори
+        …» — чтобы обе вели себя одинаково и не разъехались при правках.
+        Возвращается именно очищенный текст (схлопнутые пробелы, обрезка по
+        длине, см. `bot.tts.clean_text`), а не исходный: человек должен
+        видеть в подтверждении ровно то, что бот сказал вслух.
+        """
+        if not self._config.tts_enabled:
+            raise SpeechSynthesisUnavailableError(
+                "Синтез речи отключён настройкой TTS_ENABLED.",
+                user_message="Синтез речи отключён на этом сервере.",
+            )
+        spoken = clean_text(text)
+        if not spoken:
+            raise NothingToSayError("Пустой текст для произнесения.")
+        pcm = await self._tts.synthesize(spoken)
+        if not pcm:
+            raise SpeechSynthesisUnavailableError(
+                f"Синтез вернул пустой звук для текста {spoken!r}",
+                user_message="Не удалось произнести эту фразу.",
+            )
+        await self._player.say(pcm)
+        return spoken
 
     @app_commands.command(name="queue", description="Показать следующий трек волны")
     @app_commands.guild_only()

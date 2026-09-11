@@ -36,6 +36,9 @@ def _make_config() -> Config:
         speech_transcript=False,
         speech_debug_dir="",
         speech_debug_max_seconds=600.0,
+        tts_enabled=True,
+        tts_model_name="vosk-model-tts-ru-0.7-multi",
+        tts_speaker_id=2,
     )
 
 

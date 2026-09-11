@@ -15,6 +15,7 @@ import discord
 from discord.ext import voice_recv
 
 from bot.audio import BassLevel, TrackedAudioSource, create_source
+from bot.audio.speaking import SpeakingSource
 from bot.errors import (
     BotError,
     NotConnectedError,
@@ -30,6 +31,11 @@ logger = logging.getLogger(__name__)
 
 MAX_CONSECUTIVE_TRACK_FAILURES = 5
 _IDLE_CHECK_INTERVAL = 5.0
+
+# Страховка на случай, если фраза почему-то не договорится (соединение
+# оборвалось прямо во время неё, источник заменили). Без предела ожидающий
+# завис бы навсегда; сама длина фразы ограничена куда строже в `bot.tts`.
+_MAX_SPEECH_SECONDS = 60.0
 
 
 class PlayerState(StrEnum):
@@ -104,7 +110,7 @@ class GuildPlayer:
         self._channel: discord.VoiceChannel | discord.StageChannel | None = None
         self._session: WaveSession | None = None
         self._current_track: TrackInfo | None = None
-        self._source: TrackedAudioSource | None = None
+        self._source: SpeakingSource | None = None
         self._state = PlayerState.IDLE
 
         self._consecutive_failures = 0
@@ -318,6 +324,52 @@ class GuildPlayer:
         self._voice_client.resume()
         self._state = PlayerState.PLAYING
 
+    async def say(self, pcm: bytes) -> None:
+        """Произносит готовый PCM голосом бота, приостановив музыку на время фразы.
+
+        На вход — уже синтезированная речь в формате Discord (см.
+        `bot.tts.TextToSpeech.synthesize`): плеер намеренно ничего не знает
+        про синтез и модели, его дело — вклинить готовый звук в
+        воспроизведение и вернуть музыку обратно.
+
+        Пока звучит фраза, из музыкального источника не читается ни одного
+        кадра, поэтому трек не «проматывается» под голос, а именно стоит и
+        продолжается ровно с прерванного места (см. `bot.audio.speaking`).
+        Если музыка была на паузе, она снимается с паузы на время фразы и
+        возвращается на паузу после — иначе фразу не было бы слышно вовсе,
+        ведь приостановленное соединение не читает источник.
+
+        Ожидание окончания фразы идёт ВНЕ `self._lock`: фраза длится
+        секунды, и держать всё это время лок плеера значило бы подвесить и
+        переключение треков, и остановку.
+        """
+        if not pcm:
+            return
+        async with self._lock:
+            if self._voice_client is None:
+                raise NotConnectedError()
+            was_paused = self._voice_client.is_paused()
+            source = self._source
+            if source is None:
+                # Ничего не играет — говорим отдельным источником, который
+                # закончится вместе с фразой.
+                source = SpeakingSource(None, loop=asyncio.get_running_loop())
+                finished = source.speak(pcm)
+                self._voice_client.play(source)
+            else:
+                finished = source.speak(pcm)
+                if was_paused:
+                    self._voice_client.resume()
+
+        try:
+            await asyncio.wait_for(finished.wait(), timeout=_MAX_SPEECH_SECONDS)
+        except TimeoutError:
+            logger.warning("Фраза не договорена за %.0f с, продолжаем", _MAX_SPEECH_SECONDS)
+
+        async with self._lock:
+            if was_paused and self._voice_client is not None and self._voice_client.is_playing():
+                self._voice_client.pause()
+
     def set_volume(self, value: float) -> float:
         """Клампит громкость в 0.0..2.0, применяет её немедленно и возвращает итоговое значение."""
         clamped = max(0.0, min(2.0, value))
@@ -394,7 +446,7 @@ class GuildPlayer:
         except Exception:
             logger.exception("Ошибка при обработке завершения воспроизведения трека")
 
-    async def _handle_playback_finished(self, source: TrackedAudioSource) -> None:
+    async def _handle_playback_finished(self, source: SpeakingSource) -> None:
         """Обрабатывает завершение колбэка конкретного источника: фидбек и переход дальше."""
         async with self._lock:
             if source is not self._source:
@@ -470,6 +522,11 @@ class GuildPlayer:
                 ffmpeg_path=self._ffmpeg_path,
                 seek=seek,
             )
+            # Музыкальный источник всегда обёрнут говорящим (см.
+            # `bot.audio.speaking`): так фраза бота может вклиниться в уже
+            # идущий трек, приостановив его, — второе воспроизведение
+            # поверх первого Discord не допускает.
+            source = SpeakingSource(source, loop=asyncio.get_running_loop())
             self._voice_client.play(
                 source, after=functools.partial(self._after_playback, source)
             )

@@ -19,6 +19,9 @@ _DEFAULT_SPEECH_MODEL_PATH = "models/vosk-model-small-ru-0.22"
 # Предел отладочной записи речи на одного говорящего — см.
 # bot.speech_debug.DEFAULT_MAX_SECONDS про то, почему предел вообще нужен.
 _DEFAULT_SPEECH_DEBUG_MAX_SECONDS = 600.0
+# Модель и голос синтеза речи — см. bot.tts про то, почему выбраны эти.
+_DEFAULT_TTS_MODEL_NAME = "vosk-model-tts-ru-0.7-multi"
+_DEFAULT_TTS_SPEAKER_ID = 2
 
 # Значения переменных окружения, считающиеся истиной для булевых флагов —
 # тот же набор, что и у VOICE_RECV_DIAG (см. bot.voice_dave.diagnostics_enabled),
@@ -44,6 +47,9 @@ class Config:
     speech_transcript: bool
     speech_debug_dir: str
     speech_debug_max_seconds: float
+    tts_enabled: bool
+    tts_model_name: str
+    tts_speaker_id: int
 
     @property
     def secrets(self) -> tuple[str, ...]:
@@ -185,6 +191,26 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
             "Переменная окружения SPEECH_DEBUG_MAX_SECONDS должна быть положительным числом."
         )
 
+    # Синтез речи (команда «повтори»). Включён по умолчанию, но модель
+    # скачивается при первом обращении, а не при старте (см. bot.tts), так
+    # что включённая настройка сама по себе ничего не грузит и не замедляет
+    # запуск бота.
+    tts_enabled = _parse_bool_env("TTS_ENABLED", default=True)
+    tts_model_name = os.environ.get("TTS_MODEL_NAME", "").strip() or _DEFAULT_TTS_MODEL_NAME
+
+    tts_speaker_raw = os.environ.get("TTS_SPEAKER_ID", "").strip()
+    if not tts_speaker_raw:
+        tts_speaker_id = _DEFAULT_TTS_SPEAKER_ID
+    else:
+        try:
+            tts_speaker_id = int(tts_speaker_raw)
+        except ValueError as exc:
+            raise ConfigError(
+                "Переменная окружения TTS_SPEAKER_ID должна быть целым числом."
+            ) from exc
+    if tts_speaker_id < 0:
+        raise ConfigError("Переменная окружения TTS_SPEAKER_ID не может быть отрицательной.")
+
     return Config(
         discord_token=discord_token,
         guild_id=guild_id,
@@ -200,4 +226,7 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
         speech_transcript=speech_transcript,
         speech_debug_dir=speech_debug_dir,
         speech_debug_max_seconds=speech_debug_max_seconds,
+        tts_enabled=tts_enabled,
+        tts_model_name=tts_model_name,
+        tts_speaker_id=tts_speaker_id,
     )

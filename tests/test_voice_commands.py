@@ -4,6 +4,7 @@ import pytest
 
 from bot.voice_commands import (
     VoiceCommand,
+    is_wake_word_only,
     parse_voice_command,
 )
 
@@ -138,34 +139,56 @@ class TestWakeWordRecognition:
         cmd = parse_voice_command("э ну катя пауза")
         assert cmd is not None
 
-    def test_name_not_first_significant_word(self):
-        """Имя в середине фразы НЕ распознаётся как обращение."""
+    def test_name_at_end_with_nothing_after_is_wake_word_only(self):
+        """Имя в конце фразы без слов после него — оклик без команды, а не обращение с командой.
+
+        До снятия требования «имя первым словом» этот тест проверял именно
+        позицию имени; теперь позиция не важна нигде во фразе (см.
+        `_extract_command_body`), а `None` здесь получается по другой причине
+        — после последнего найденного «катя» просто не осталось слов.
+        """
         cmd = parse_voice_command("пауза катя")
         assert cmd is None
 
     def test_name_not_first_significant_word_with_command_after_example1(self):
-        """Имя не в начале, но с командой после (пример 1): 'привет катя следующий трек'."""
+        """Имя не в начале, но с командой после (пример 1): 'привет катя следующий трек'.
+
+        Раньше имя было обязано быть первым значимым словом, и эта фраза
+        давала `None`. Требование снято: Vosk отдаёт длинную реплику без пауз
+        одним куском, и обращение посреди фразы — обычное дело для живой
+        речи, а не мусор. Теперь это нормальное обращение к боту, и команда
+        после последнего «катя» распознаётся как `skip`.
+        """
         cmd = parse_voice_command("привет катя следующий трек")
-        assert cmd is None, (
-            "Имя должно быть первым значимым словом; "
-            "'привет катя следующий трек' - имя не в начале, поэтому None"
+        assert cmd is not None, (
+            "Имя может стоять не первым словом фразы; "
+            "'привет катя следующий трек' обязано распознаться как skip"
         )
+        assert cmd.action == "skip"
 
     def test_name_not_first_significant_word_with_command_after_example2(self):
-        """Имя не в начале, но с командой после (пример 2): 'мы с катей вчера включи волну'."""
+        """Имя не в начале, но с командой после (пример 2): 'мы с катей вчера включи волну'.
+
+        См. докстринг примера 1 про снятие требования «имя первым словом».
+        После последнего «катей» идёт «вчера включи волну»: «включи» — это
+        повелительное наклонение (не прошедшее время, см.
+        `_looks_like_past_tense`), поэтому фильтр пересказа тут не
+        срабатывает, а основа «волн» в «волну» даёт `wave`.
+        """
         cmd = parse_voice_command("мы с катей вчера включи волну")
-        assert cmd is None, (
-            "Имя должно быть первым значимым словом; "
-            "'мы с катей вчера включи волну' - имя не в начале, поэтому None"
-        )
+        assert cmd is not None
+        assert cmd.action == "wave"
 
     def test_name_not_first_significant_word_with_command_after_example3(self):
-        """Имя не в начале, но с командой после (пример 3): 'скажи кате поставь на паузу'."""
+        """Имя не в начале, но с командой после (пример 3): 'скажи кате поставь на паузу'.
+
+        См. докстринг примера 1 про снятие требования «имя первым словом».
+        После последнего «кате» идёт «поставь на паузу» — основа «пауз» даёт
+        `pause`.
+        """
         cmd = parse_voice_command("скажи кате поставь на паузу")
-        assert cmd is None, (
-            "Имя должно быть первым значимым словом; "
-            "'скажи кате поставь на паузу' - имя не в начале, поэтому None"
-        )
+        assert cmd is not None
+        assert cmd.action == "pause"
 
     def test_only_name_no_command(self):
         """Только имя без команды даёт None."""
@@ -475,11 +498,16 @@ class TestStopAction:
         assert cmd is not None
         assert cmd.action == "stop"
 
-    def test_stop_finished(self):
-        """Команда 'закончили' даёт stop."""
-        cmd = parse_voice_command("катя закончили")
-        assert cmd is not None
-        assert cmd.action == "stop"
+    def test_finished_is_not_a_stop_command(self):
+        """«закончили» больше НЕ команда остановки — синоним убран сознательно.
+
+        Слово по форме неотличимо от обычного прошедшего времени, и ради
+        него всему правилу приходилось снимать защиту от пересказа. Вместе
+        с ним мимо защиты проходили «отключила», «выключила», «ушла», и
+        сказанное о человеке «Катя закончила работу» отключало бота от
+        канала. Подробности — в докстринге `_rule_stop`.
+        """
+        assert parse_voice_command("катя закончили") is None
 
     def test_stop_leave_channel(self):
         """Команда 'покинь канал' даёт stop."""
@@ -888,3 +916,161 @@ class TestSecondWakeWord:
         начинаться с «ген»/«гин»/«гий» — на эти тесты и опирается запрет.
         """
         assert parse_voice_command(text) is None
+
+    def test_purgen_mishearing_via_levenshtein(self):
+        """«Пурген» (слабительное) не в списке форм, но проходит по допуску Левенштейна.
+
+        Отличается от «гурген» ровно одной буквой, поэтому уже опознаётся как
+        обращение без добавления в `_NAME_FORMS` (см. комментарий рядом с ним).
+        """
+        cmd = parse_voice_command("пурген следующий трек")
+        assert cmd is not None
+        assert cmd.action == "skip"
+
+    def test_guru_gen_two_word_mishearing(self):
+        """«Гуру ген» — по наблюдению пользователя в живой работе, тоже разбитое надвое имя."""
+        cmd = parse_voice_command("гуру ген следующий трек")
+        assert cmd is not None
+        assert cmd.action == "skip"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "пурген следующий трек",
+            "гуру ген следующий трек",
+        ],
+    )
+    def test_user_reported_mishearings_recognized(self, text):
+        """Варианты, добавленные по наблюдениям пользователя в живой работе, дают skip."""
+        cmd = parse_voice_command(text)
+        assert cmd is not None
+        assert cmd.action == "skip"
+
+    def test_bare_purgen_is_wake_word_only_not_a_command(self):
+        """Голое «пурген» без команды — это оклик, а не команда."""
+        assert parse_voice_command("пурген") is None
+        assert is_wake_word_only("пурген") is True
+
+    def test_bare_guru_gen_is_wake_word_only_not_a_command(self):
+        """Голое «гуру ген» без команды — тоже оклик, а не команда."""
+        assert parse_voice_command("гуру ген") is None
+        assert is_wake_word_only("гуру ген") is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "гуру сказал дальше",
+            "гуру медитации включи музыку",
+            "выпил пурген",
+            "гуру дальше",
+        ],
+    )
+    def test_real_words_do_not_trigger_false_positives(self, text):
+        """«Пурген» и «гуру» — реальные слова языка и не должны ловить обычную речь.
+
+        «Гуру» без второго слова на «ген»/«гин»/«гий» сразу после себя не
+        образует пару (см. `_NAME_PAIR_FIRST`). «Пурген» само по себе может
+        найтись как обращение (см. `test_purgen_mid_sentence_opens_wake_word_window`
+        в `TestPastTenseNarrativeGuard`) — но ни в одной из этих фраз после
+        него нет командного слова, так что действия всё равно не будет.
+        """
+        assert parse_voice_command(text) is None
+
+
+class TestWakeWordAnywhereInPhrase:
+    """Имя может стоять где угодно во фразе, а не только первым словом.
+
+    Vosk отдаёт длинную реплику одним куском по паузе в речи, а не по
+    границам смысловых частей — человек, говорящий без остановки, не всегда
+    начинает фразу с обращения к боту. Командой считаются слова после
+    ПОСЛЕДНЕГО найденного обращения (см. `_extract_command_body`). Три
+    примера, для которых это раньше было принципиально важным ограничением
+    (`None` вместо команды), переписаны прямо в `TestWakeWordRecognition` —
+    здесь дополнительные случаи и «последнее обращение побеждает».
+    """
+
+    def test_name_mid_long_uninterrupted_phrase(self):
+        """Одна длинная фраза без пауз: команда после имени распознаётся, даже если не первое."""
+        cmd = parse_voice_command(
+            "а если вас сначала говорю что-то не понятно а потом говорю катя "
+            "включи следующую песню"
+        )
+        assert cmd is not None
+        assert cmd.action == "skip"
+
+    def test_name_after_hesitation_words(self):
+        """'ну это самое катя пауза' — обращение после случайных вводных слов распознаётся."""
+        cmd = parse_voice_command("ну это самое катя пауза")
+        assert cmd is not None
+        assert cmd.action == "pause"
+
+    def test_last_occurrence_wins_when_name_repeated(self):
+        """При двух повторах имени тело команды берётся после ВТОРОГО (последнего) вхождения."""
+        cmd = parse_voice_command("катя катя следующий трек")
+        assert cmd is not None
+        assert cmd.action == "skip"
+
+    def test_wake_word_only_mid_sentence(self):
+        """Оклик посреди фразы тоже открывает окно ожидания следующей команды."""
+        assert is_wake_word_only("что-то говорю катя") is True
+        assert is_wake_word_only("катя") is True
+
+
+class TestPastTenseNarrativeGuard:
+    """Защита от пересказа: упоминание имени в рассказе о прошлом — не команда.
+
+    Снятие требования «имя первым словом» (см. `TestWakeWordAnywhereInPhrase`)
+    открывает риск принять за команду случайное упоминание имени в разговоре,
+    вообще не адресованном боту. Настоящую защиту даёт эвристика на прошедшее
+    время (см. `_looks_like_past_tense`), а не позиция имени во фразе.
+    """
+
+    def test_past_tense_verb_after_name_is_not_a_command(self):
+        """«я вчера кате включил эту песню» — рассказ о прошлом, не команда `search`."""
+        assert parse_voice_command("я вчера кате включил эту песню") is None
+
+    def test_past_tense_verb_blocks_bare_noun_wave_trigger(self):
+        """«мы с катей вчера включили волну» — не команда, хотя «волну» само не прошедшее время.
+
+        Основа «волн» у `_rule_wave` не требует глагола-триггера (голое «моя
+        волна» уже команда), поэтому фильтр здесь смотрит на ВСЮ фразу
+        целиком: глагол прошедшего времени «включили» где-то рядом
+        достаточен, чтобы не сработать (см. докстринг `_rule_wave`).
+        """
+        assert parse_voice_command("мы с катей вчера включили волну") is None
+
+    def test_past_tense_verb_blocks_pause_stem(self):
+        """«кто-то говорил что катя остановил музыку» — не команда `pause`."""
+        assert parse_voice_command("кто-то говорил что катя остановил музыку") is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "катя закончила работу",
+            "катя отключила свет вчера",
+            "катя выключила чайник",
+            "катя ушла домой",
+        ],
+    )
+    def test_stop_rule_is_also_guarded(self, text):
+        """Правило остановки защищено от пересказа наравне с остальными.
+
+        Раньше у него было исключение ради синонима «закончили», и оно
+        снимало защиту со всего правила разом: сказанное о человеке
+        «Катя закончила работу» отключало бота от голосового канала.
+        Синоним убран, исключений больше нет (см. `_rule_stop`).
+        """
+        assert parse_voice_command(text) is None
+
+    def test_purgen_mid_sentence_opens_wake_word_window(self):
+        """Известный побочный эффект: «пурген» где угодно во фразе — тоже валидное обращение.
+
+        «Пурген» проходит по допуску Левенштейна как форма «гурген» (см.
+        `TestSecondWakeWord.test_purgen_mishearing_via_levenshtein`), и раз
+        имя ищется по всей фразе, обмолвка вроде «выпил пурген» открывает
+        окно ожидания следующей фразы, хотя сама командой не становится. Это
+        цена того же допуска, который даёт распознать «пурген следующий
+        трек» как настоящее обращение.
+        """
+        assert parse_voice_command("выпил пурген") is None
+        assert is_wake_word_only("выпил пурген") is True
