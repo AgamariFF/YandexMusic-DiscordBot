@@ -796,3 +796,95 @@ class TestNoOtherFieldsFilled:
         assert cmd.query is not None
         assert cmd.volume_percent is None
         assert cmd.volume_delta is None
+
+
+class TestSecondWakeWord:
+    """Второе имя бота — «Гурген» — и то, как его слышит малая модель Vosk.
+
+    Слова «гурген» нет в словаре модели, и произнесённое имя она отдаёт как
+    «гордин», «гардин», «мурген» либо разбитым надвое — «гор гин», «гор
+    гена». Набор проверен на синтезированной речи (три скорости, восемь
+    фраз): все 24 записи дошли до верной команды. Тесты закрепляют именно
+    эти варианты — выкинув их, легко получить имя, «правильное» по
+    написанию и не работающее вживую.
+    """
+
+    def test_written_name(self):
+        """Само написание имени распознаётся — на случай модели побогаче."""
+        cmd = parse_voice_command("гурген следующий трек")
+        assert cmd is not None
+        assert cmd.action == "skip"
+
+    @pytest.mark.parametrize("heard", ["гордин", "гардин", "мурген", "горгий"])
+    def test_single_word_mishearings(self, heard):
+        """Однословные ошибки модели на имени «Гурген» считаются обращением."""
+        cmd = parse_voice_command(f"{heard} следующий трек")
+        assert cmd is not None
+        assert cmd.action == "skip"
+
+    @pytest.mark.parametrize("heard", ["гор гин", "гор гена", "гор гену", "гур гин", "укор гин"])
+    def test_two_word_mishearings(self, heard):
+        """Имя, разбитое моделью на два слова, тоже считается обращением."""
+        cmd = parse_voice_command(f"{heard} дальше")
+        assert cmd is not None
+        assert cmd.action == "skip"
+
+    @pytest.mark.parametrize("text", ["гургена", "гургену", "гургеном", "гургене"])
+    def test_name_cases(self, text):
+        """Падежи имени распознаются наравне с именительным."""
+        assert parse_voice_command(f"{text} пауза") is not None
+
+    def test_bare_name_is_not_a_command(self):
+        """Один только оклик вторым именем командой не является."""
+        assert parse_voice_command("гордин") is None
+        assert parse_voice_command("гор гин") is None
+
+    def test_both_names_work(self):
+        """Оба имени равноправны — первое не перестало работать."""
+        assert parse_voice_command("катя пауза") is not None
+        assert parse_voice_command("гурген пауза") is not None
+
+    def test_filler_before_second_name(self):
+        """Слово-заполнитель перед вторым именем тоже допускается."""
+        cmd = parse_voice_command("эй гор гин отключись")
+        assert cmd is not None
+        assert cmd.action == "stop"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "город большой включи свет",
+            "горы дальше на север",
+            "повесь гардины пожалуйста",
+            "гор дальше",
+            "гурман дальше",
+            "гордон дальше",
+            "горький дальше",
+            "в гору дальше",
+            "гора гена дальше",
+            "гений дальше",
+            "ген дальше",
+        ],
+    )
+    def test_no_false_positives(self, text):
+        """Обычная речь, похожая на имя началом слова, командой не становится."""
+        assert parse_voice_command(text) is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "укор совести дальше",
+            "гор гитара следующий трек",
+            "гур молоко дальше",
+            "гор вода громкость пятьдесят",
+        ],
+    )
+    def test_pair_requires_second_word(self, text):
+        """Обращением считается только пара целиком, а не одно первое слово.
+
+        Слова «гор», «гур», «укор» сами по себе в речи не редкость, и если
+        считать обращением их одних, бот начнёт выполнять команды из фраз
+        вроде «укор совести… дальше». Поэтому второе слово пары обязано
+        начинаться с «ген»/«гин»/«гий» — на эти тесты и опирается запрет.
+        """
+        assert parse_voice_command(text) is None
