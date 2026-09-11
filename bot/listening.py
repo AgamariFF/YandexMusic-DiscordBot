@@ -54,6 +54,17 @@ logger = logging.getLogger(__name__)
 # при этом задержку между произнесённым словом и распознанным текстом.
 _MAX_QUEUED_FRAMES = 50
 
+# Пауза в речи, после которой фраза считается законченной и досрочно
+# сбрасывается (см. `SpeechRecognizer.flush`). Само распознавание закрывает
+# фразу лишь после полусекунды непрерывной ТИШИНЫ в звуке, но Discord,
+# когда человек замолчал, шлёт около сотни миллисекунд тишины и перестаёт
+# слать пакеты вовсе — то есть ожидаемая тишина просто не приходит, и без
+# этого таймаута команда становилась бы известна только тогда, когда
+# человек заговорит снова. Значение подобрано как компромисс: достаточно
+# долго, чтобы не разрывать фразу на естественной паузе между словами, и
+# достаточно коротко, чтобы бот отзывался сразу после сказанного.
+PHRASE_SILENCE_TIMEOUT = 0.4
+
 
 def _build_speech_resampler() -> av.AudioResampler:
     """Собирает ресемплер, приводящий кадры Discord (48 кГц/стерео) к формату Vosk (16 кГц/моно).
@@ -338,8 +349,21 @@ class GuildListener:
         выполняться параллельно, пока эта ждёт результат.
         """
         resampler = _build_speech_resampler()
+        # Есть ли незакрытая фраза, которую имеет смысл сбросить по паузе.
+        # Без этого флага задача сбрасывала бы пустоту каждые полсекунды
+        # всё время, пока человек молчит.
+        unfinished = False
         while True:
-            frame = await queue.get()
+            try:
+                frame = await asyncio.wait_for(queue.get(), timeout=PHRASE_SILENCE_TIMEOUT)
+            except TimeoutError:
+                if unfinished:
+                    unfinished = False
+                    text = await self._recognizer.flush(speaker_id)
+                    if text:
+                        await self._deliver_phrase(speaker_id, text)
+                continue
+            unfinished = True
             for resampled in resampler.resample(frame):
                 pcm = frame_to_pcm(resampled)
                 if not pcm:
@@ -353,9 +377,16 @@ class GuildListener:
                     self._recorder.write(speaker_id, pcm)
                 text = await self._recognizer.feed(speaker_id, pcm)
                 if text:
-                    if self._recorder is not None:
-                        self._recorder.note_phrase(speaker_id, text)
-                    await self._emit_phrase(speaker_id, text)
+                    # Фраза закрылась сама (распознавание услышало паузу
+                    # прямо в потоке речи) — сбрасывать по таймауту нечего.
+                    unfinished = False
+                    await self._deliver_phrase(speaker_id, text)
+
+    async def _deliver_phrase(self, speaker_id: int, text: str) -> None:
+        """Отдаёт распознанную фразу дальше: в отладочную запись и в колбэк."""
+        if self._recorder is not None:
+            self._recorder.note_phrase(speaker_id, text)
+        await self._emit_phrase(speaker_id, text)
 
     async def _emit_phrase(self, speaker_id: int, text: str) -> None:
         """Отдаёт распознанную фразу колбэку; ошибки колбэка не роняют прослушивание."""

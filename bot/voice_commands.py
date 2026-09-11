@@ -507,6 +507,39 @@ def parse_voice_command(text: str) -> VoiceCommand | None:
         return None
 
 
+def describe_command(command: VoiceCommand) -> str:
+    """Короткое человеческое описание команды — для мгновенного «слышу тебя» в чате.
+
+    Нужно, чтобы бот успел подтвердить понимание ДО того, как выполнит
+    команду: запуск волны и поиск трека ходят в API Яндекс.Музыки и
+    занимают заметное время, в течение которого иначе не понять, услышал
+    бот команду или нет (см. `bot.cogs.voice_control`).
+    """
+    if command.action == "pause":
+        return "ставлю на паузу"
+    if command.action == "resume":
+        return "продолжаю"
+    if command.action == "skip":
+        return "переключаю трек"
+    if command.action == "stop":
+        return "отключаюсь"
+    if command.action == "now_playing":
+        return "смотрю, что играет"
+    if command.action == "volume":
+        if command.volume_percent is not None:
+            return f"ставлю громкость {command.volume_percent}%"
+        if command.volume_delta is not None:
+            return "делаю громче" if command.volume_delta > 0 else "делаю тише"
+        return "меняю громкость"
+    if command.action == "wave":
+        if command.query:
+            return f"ищу «{command.query}» и запускаю волну"
+        return "запускаю «Мою волну»"
+    if command.action == "search":
+        return f"ищу «{command.query}»" if command.query else "ищу трек"
+    return "выполняю команду"
+
+
 def _match_rules(body: list[str]) -> VoiceCommand | None:
     """Прогоняет тело команды по правилам `_RULES`; первое подошедшее выигрывает."""
     for rule in _RULES:

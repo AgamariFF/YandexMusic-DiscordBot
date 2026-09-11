@@ -91,6 +91,20 @@ def _load_model_sync(model_path: str) -> Model:
         ) from exc
 
 
+def _final_result(recognizer: KaldiRecognizer) -> str | None:
+    """Досрочно закрывает текущую фразу и возвращает её текст, если он непустой.
+
+    Выполняется в отдельном потоке (см. `SpeechRecognizer.flush`), хотя и
+    стоит всего несколько миллисекунд: `KaldiRecognizer` — нативный объект
+    с состоянием, и обращаться к нему из разных потоков одновременно
+    нельзя, поэтому сброс идёт через тот же лок и тот же пул, что и
+    обычная обработка.
+    """
+    result = json.loads(recognizer.FinalResult())
+    text = result.get("text", "").strip()
+    return text or None
+
+
 def _process_chunk(recognizer: KaldiRecognizer, pcm: bytes) -> str | None:
     """Кормит распознаватель PCM-чанком; возвращает текст, если фраза именно на нём завершилась.
 
@@ -198,6 +212,30 @@ class SpeechRecognizer:
         state = self._get_or_create_speaker(speaker_id)
         async with state.lock:
             text = await asyncio.to_thread(_process_chunk, state.recognizer, pcm)
+            state.last_active = time.monotonic()
+        return text
+
+    async def flush(self, speaker_id: int) -> str | None:
+        """Досрочно закрывает фразу говорящего и возвращает её текст. Без модели — `None`.
+
+        Нужен потому, что сама по себе фраза закрывается только по тишине,
+        а тишина в голосовом канале заканчивается раньше, чем распознавание
+        успевает счесть фразу законченной: Discord после того, как человек
+        замолчал, отправляет около сотни миллисекунд тишины и перестаёт
+        слать пакеты вовсе, тогда как распознаванию нужно порядка
+        полусекунды. Без досрочного сброса текст команды появлялся бы
+        только в тот момент, когда человек заговорит СНОВА, — то есть
+        неизвестно когда (см. `bot.listening.GuildListener._pump_speaker`,
+        который и вызывает этот метод по паузе).
+
+        Идемпотентен: повторный сброс без новой речи вернёт `None`, потому
+        что закрывать уже нечего.
+        """
+        state = self._speakers.get(speaker_id)
+        if state is None:
+            return None
+        async with state.lock:
+            text = await asyncio.to_thread(_final_result, state.recognizer)
             state.last_active = time.monotonic()
         return text
 

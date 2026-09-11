@@ -44,6 +44,7 @@ from bot.speech import SpeechRecognizer
 from bot.speech_debug import SpeechRecorder
 from bot.voice_commands import (
     VoiceCommand,
+    describe_command,
     is_wake_word_only,
     parse_command_body,
     parse_voice_command,
@@ -56,6 +57,15 @@ logger = logging.getLogger(__name__)
 # договорить после паузы, и достаточно коротко, чтобы случайная реплика
 # через минуту после «Катя?» уже не была принята за команду.
 WAKE_FOLLOW_UP_SECONDS = 10.0
+
+# Через сколько секунд убирается сообщение бота об выполненной голосовой
+# команде: подтверждения нужны сразу и ненадолго, копить их в канале незачем.
+_REPLY_LIFETIME_SECONDS = 10.0
+
+# Команды, которые ходят в API Яндекс.Музыки и потому выполняются заметно
+# дольше мгновенных: у них человек успевает решить, что бот не услышал (см.
+# `VoiceControlCog._send_ack`).
+_SLOW_ACTIONS = frozenset({"wave", "search", "skip"})
 
 
 class VoiceControlCog(commands.Cog, name="Голосовое управление"):
@@ -284,16 +294,60 @@ class VoiceControlCog(commands.Cog, name="Голосовое управлени�
             return
 
         speaker = self._resolve_speaker(speaker_id)
+        ack = await self._send_ack(channel, command)
         reply = await self._music_cog.execute_voice_command(command, speaker)
+        await self._finish_ack(channel, ack, reply)
 
+    async def _send_ack(
+        self, channel: discord.abc.Messageable | None, command: VoiceCommand
+    ) -> discord.Message | None:
+        """Подтверждает, что команда услышана, ДО того как она будет выполнена.
+
+        Запуск волны, поиск трека и переключение ходят в API Яндекс.Музыки
+        и занимают заметное время. Без этого подтверждения всё это время
+        непонятно, услышал бот команду или нет, и человек повторяет её
+        вслух — а бот потом выполняет обе. Поэтому сначала быстрый ответ
+        «слышу, делаю то-то», и только потом сама работа.
+
+        Мгновенные команды (пауза, продолжение) подтверждать отдельно
+        незачем — они и так ответят раньше, чем подтверждение долетит.
+        """
+        if channel is None or command.action not in _SLOW_ACTIONS:
+            return None
+        try:
+            return await channel.send(
+                f"⏳ Слышу: {describe_command(command)}…",
+                # Описание включает свободный ввод из самой команды
+                # (поисковый запрос) — тот же приём и та же причина, что и
+                # в _publish_transcript выше.
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            # Подтверждение — удобство, а не часть команды: не смогли его
+            # отправить — выполняем команду всё равно.
+            logger.debug("Не удалось отправить подтверждение голосовой команды", exc_info=True)
+            return None
+
+    async def _finish_ack(
+        self,
+        channel: discord.abc.Messageable | None,
+        ack: discord.Message | None,
+        reply: str,
+    ) -> None:
+        """Заменяет подтверждение итогом команды, либо отправляет итог заново."""
+        mentions = discord.AllowedMentions.none()
+        if ack is not None:
+            try:
+                await ack.edit(content=reply, allowed_mentions=mentions)
+                await ack.delete(delay=_REPLY_LIFETIME_SECONDS)
+                return
+            except discord.HTTPException:
+                logger.debug("Не удалось обновить подтверждение команды", exc_info=True)
         if channel is not None:
             await channel.send(
                 reply,
-                delete_after=10,
-                # reply может включать свободный ввод из самой команды
-                # (например поисковый запрос) — тот же приём и та же причина,
-                # что и в _publish_transcript выше.
-                allowed_mentions=discord.AllowedMentions.none(),
+                delete_after=_REPLY_LIFETIME_SECONDS,
+                allowed_mentions=mentions,
             )
 
     @commands.Cog.listener()
