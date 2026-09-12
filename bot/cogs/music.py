@@ -650,6 +650,7 @@ class MusicCog(commands.Cog, name="Музыка"):
             )
         except BotError as exc:
             logger.warning("Ошибка голосовой команды %s: %s", command.action, exc)
+            await self._speak_voice_error(exc)
             return exc.user_message
         if command.action in self._VOICE_COMMANDS_UPDATE_PLAYER_MESSAGE:
             await self._update_player_message()
@@ -673,6 +674,7 @@ class MusicCog(commands.Cog, name="Музыка"):
             reply = await self._dispatch_voice_command(command, speaker)
         except BotError as exc:
             logger.warning("Ошибка голосовой команды %s: %s", command.action, exc)
+            await self._speak_voice_error(exc)
             return exc.user_message
         if command.action in self._VOICE_COMMANDS_UPDATE_PLAYER_MESSAGE:
             await self._update_player_message()
@@ -730,6 +732,68 @@ class MusicCog(commands.Cog, name="Музыка"):
                 "Голосовой ответ на команду %s не произнесён: %s", command.action, exc
             )
 
+    async def _speak_voice_error(self, exc: BotError) -> None:
+        """Озвучивает провалившуюся голосовую команду: вводная фраза плюс причина.
+
+        Вызывается из обоих мест, где `execute_voice_command`/
+        `_execute_stop_voice_command` ловят `BotError` действия. Текст в чат
+        (`exc.user_message`) уже решён вызывающим кодом и этой функцией не
+        меняется — она лишь озвучивает ту же причину вслух, предварив её
+        короткой вводной фразой из группы `pick_reply("error")` (например
+        «Не вышло. Поиск треков сейчас недоступен. Попробуйте позже.»).
+        Собственно склейка вводной и сообщения, а также защита от того, что
+        озвучивание само упадёт, — в общей `_speak_voice_followup`.
+        """
+        await self._speak_voice_followup("error", exc.user_message)
+
+    async def _speak_voice_followup(self, intro_action: str, message: str) -> None:
+        """Озвучивает вводную фразу `intro_action` и следом произвольное `message`.
+
+        Общая часть двух путей, где к моменту произнесения действие уже
+        отработало (успешно или с ошибкой) и остаётся лишь сказать о
+        результате: `_speak_voice_error` (`intro_action="error"`,
+        `message=exc.user_message` — вся причина целиком) и
+        `_search_and_start_wave_voice` на пустом результате поиска
+        (`intro_action="not_found"`, `message` — только сам запрос, см. её
+        докстринг про то, почему не вся фраза из чата). Если для
+        `intro_action` фраз ещё нет (`pick_reply` вернул `None` — например,
+        группа `"not_found"`/`"error"` ещё не добавлена в `PHRASES`),
+        произносится одно `message` без вводной — это часть контракта
+        `pick_reply`, а не сбой. Пустой `message` (см. пустой запрос в
+        `_search_and_start_wave_voice`) — тоже штатный случай: прозвучит
+        одна вводная.
+
+        Реплика на успех (`_speak_voice_reply`) к этому моменту могла уже
+        начать звучать параллельно с этим же действием — например «Ловим
+        волну», а следом эта функция скажет что-то вроде «Тут пусто. По
+        запросу группа кино.». Отдельно останавливать начатую фразу не
+        нужно: `player.say` и так заменяет недоговорённую реплику новой (см.
+        `SpeakingSource.speak`), а услышанная подряд пара фраз звучит как
+        обычная человеческая речь, а не как недосмотр.
+
+        Действует по тем же правилам, что и `_speak_voice_reply`, и это
+        принципиально: неготовая модель, выключенный синтез или выключенные
+        реплики, а также любая ошибка самого синтеза должны быть проглочены
+        здесь же, в `logger.debug`. Иначе озвучивание результата могло бы
+        само бросить `BotError` и разрушить и без того завершившуюся команду
+        — то есть озвучивание не должно порождать новую ошибку.
+        """
+        if not self._config.tts_enabled or not self._config.voice_replies:
+            return
+        if not self._tts.is_ready:
+            logger.debug(
+                "Голосовой ответ %s не озвучен: модель синтеза ещё не готова", intro_action
+            )
+            return
+        intro = pick_reply(intro_action)
+        phrase = f"{intro} {message}" if intro is not None else message
+        try:
+            pcm = await self._tts.synthesize(phrase)
+            if pcm:
+                await self._player.say(pcm)
+        except BotError as speak_exc:
+            logger.debug("Голосовой ответ %s не произнесён: %s", intro_action, speak_exc)
+
     async def _dispatch_voice_command(
         self, command: VoiceCommand, speaker: discord.Member | None
     ) -> str:
@@ -782,10 +846,33 @@ class MusicCog(commands.Cog, name="Музыка"):
         без интеракции: `search` и `wave` с заданным треком/исполнителем
         (`command.query`) делают одно и то же — находят трек и запускают
         волну от него.
+
+        Пустой результат поиска — не `BotError` (`_resolve_search_track`
+        просто возвращает `None`, это штатный исход, а не сбой), поэтому
+        путь озвучивания ошибок (`_speak_voice_error`) его не перехватит.
+        Раз человек отдал команду голосом, он не увидит текст в чате, пока
+        сам не заглянет туда, — значит о пустом результате нужно сказать
+        вслух отдельно, тем же `_speak_voice_followup`, но с вводной фразой
+        из группы `"not_found"`.
+
+        Произносимая фраза НАРОЧНО отличается от текста в чат (`reply`), а
+        не склеена из вводной и него целиком, как в `_speak_voice_error`.
+        Вводные `"not_found"` уже содержат «ничего» («Ничего похожего»,
+        «Тут пусто» и т. п.), и приклеенное следом «Ничего не найдено по
+        запросу…» звучит тавтологией — двойное «ничего» подряд. Поэтому
+        вслух после вводной называется только сам запрос, без повтора того,
+        что ничего не нашлось: «Ничего похожего. По запросу группа кино.»
+        Текст в чат при этом остаётся полным и неизменным — там тавтологии
+        не слышно, менять его незачем.
         """
         track = await self._resolve_search_track(query)
         if track is None:
-            return f"Ничего не найдено по запросу «{query}»."
+            reply = f"Ничего не найдено по запросу «{query}»."
+            # См. докстринг выше про расхождение с `reply`: пустой запрос
+            # оставляет только вводную фразу, без пустого "По запросу ."
+            spoken_detail = f"По запросу {query}." if query else ""
+            await self._speak_voice_followup("not_found", spoken_detail)
+            return reply
         error = await self._connect_for_speaker(speaker)
         if error is not None:
             return error

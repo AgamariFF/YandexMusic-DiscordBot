@@ -44,9 +44,9 @@ class TestKnownActions:
         )
 
     @pytest.mark.parametrize("action", PHRASES.keys())
-    def test_all_eight_actions_are_supported(self, action: str):
-        """Все восемь действий (pause, resume, skip, stop, wave, search, volume, now_playing)
-        возвращают непустой результат."""
+    def test_all_ten_actions_are_supported(self, action: str):
+        """Все десять действий (pause, resume, skip, stop, wave, search, volume, now_playing,
+        error, not_found) возвращают непустой результат."""
         result = pick_reply(action)
         assert result is not None, f"Действие {action!r} вернуло None, но должно быть поддерживаемо"
         assert len(result) > 0
@@ -265,15 +265,22 @@ class TestPhrasesStructure:
                 )
                 assert len(phrase) > 0, f"PHRASES[{action!r}][{i}] пуста"
 
-    def test_all_actions_have_eleven_phrases(self):
-        """Каждое действие имеет ровно 11 фраз (по спецификации)."""
+    def test_all_actions_have_ten_to_fifteen_phrases(self):
+        """У каждого действия от 10 до 15 фраз (именно такой диапазон ставился авторам фраз).
+
+        Диапазон, а не точное число: список фраз пополняется со временем (см.
+        группы "error" и "not_found" с 13 фразами против 11 у более старых
+        действий), и тест не должен падать на штатном пополнении. Он всё
+        равно ловит настоящую поломку — опустевшую группу или разросшуюся до
+        неприличия.
+        """
         for action, phrases in PHRASES.items():
-            assert len(phrases) == 11, (
-                f"PHRASES[{action!r}] имеет {len(phrases)} фраз, но ожидалось 11"
+            assert 10 <= len(phrases) <= 15, (
+                f"PHRASES[{action!r}] имеет {len(phrases)} фраз, ожидалось от 10 до 15"
             )
 
-    def test_eight_actions_total(self):
-        """Ровно 8 действий: pause, resume, skip, stop, wave, search, volume, now_playing."""
+    def test_ten_actions_total(self):
+        """Ровно 10 действий: восемь исходных плюс error и not_found."""
         expected_actions = {
             "pause",
             "resume",
@@ -283,6 +290,8 @@ class TestPhrasesStructure:
             "search",
             "volume",
             "now_playing",
+            "error",
+            "not_found",
         }
         actual_actions = set(PHRASES.keys())
         assert actual_actions == expected_actions, (
