@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 
@@ -22,8 +23,9 @@ from bot.errors import (
     SpeechSynthesisUnavailableError,
 )
 from bot.player import GuildPlayer, PlayerState
-from bot.tts import MAX_TEXT_LENGTH, TextToSpeech, clean_text
+from bot.tts import MAX_TEXT_LENGTH, TextToSpeech, clean_text, speakable_text
 from bot.voice_commands import VoiceCommand
+from bot.voice_replies import pick_reply
 from bot.yandex import TrackInfo, YandexMusicClient
 
 logger = logging.getLogger(__name__)
@@ -137,6 +139,9 @@ class MusicCog(commands.Cog, name="Музыка"):
         self._tts = TextToSpeech(
             model_name=config.tts_model_name, speaker_id=config.tts_speaker_id
         )
+        # Фоновый прогрев модели синтеза — см. `cog_load` про то, почему
+        # ленивая загрузка при первой фразе оказалась негодной.
+        self._tts_warmup_task: asyncio.Task[None] | None = None
         # Единственное сообщение-плеер сервера, его текущий PlayerView и лок,
         # под которым идёт любая правка — подробности см. в докстринге
         # `_update_player_message`. `_player_view` нужен отдельно от
@@ -172,8 +177,47 @@ class MusicCog(commands.Cog, name="Музыка"):
         """
         return self._announce_channel
 
+    async def cog_load(self) -> None:
+        """Начинает прогрев модели синтеза заранее, фоновой задачей.
+
+        Загрузка модели синтеза занимает около пяти секунд и при этом
+        ЗАМОРАЖИВАЕТ цикл событий примерно на три из них — замерено: ONNX
+        держит GIL, и вынос в отдельный поток (`asyncio.to_thread` внутри
+        `TextToSpeech.ensure_ready`) от этого не спасает. Пока модель не
+        загружена, бот не отвечает ни на что: в живом логе первая же
+        команда «включи волну» получила таймаут запроса к Яндекс.Музыке, а
+        музыка заиграла на двенадцать секунд позже сказанного.
+
+        Поэтому модель грузится сразу при старте, когда бот ещё ничем не
+        занят, а не лениво при первой фразе — то есть ровно в тот момент,
+        когда человек чего-то ждёт. Задача фоновая: заминка при старте
+        никому не мешает, а проваленная загрузка (нет сети, нет места на
+        диске) не должна мешать боту работать без синтеза вовсе.
+        """
+        if not self._config.tts_enabled:
+            return
+        self._tts_warmup_task = asyncio.create_task(self._warm_up_tts())
+
+    async def _warm_up_tts(self) -> None:
+        """Грузит модель синтеза заранее; неудача лишь отключает голосовые ответы."""
+        try:
+            await self._tts.ensure_ready()
+        except BotError as exc:
+            logger.warning(
+                "Синтез речи недоступен, бот будет выполнять команды молча: %s",
+                exc.user_message,
+            )
+        except Exception:
+            logger.exception("Не удалось заранее загрузить модель синтеза речи")
+
     async def cog_unload(self) -> None:
-        """Останавливает текущий PlayerView и отключает плеер при выгрузке кога."""
+        """Останавливает прогрев синтеза, текущий PlayerView и отключает плеер."""
+        task = self._tts_warmup_task
+        self._tts_warmup_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         if self._player_view is not None:
             self._player_view.stop()
         await self._player.disconnect()
@@ -565,15 +609,66 @@ class MusicCog(commands.Cog, name="Музыка"):
     ) -> str:
         """Выполняет голосовую команду «Катя …» и возвращает короткий текст-подтверждение.
 
+        Само действие и короткая голосовая реплика на него (см.
+        `bot.voice_replies.pick_reply`) выполняются ПАРАЛЛЕЛЬНО, а не
+        сначала одно, потом другое: пользователь просил именно так, и
+        ждать окончания фразы бота перед выполнением команды (или наоборот)
+        незачем. Единственное исключение — `stop`, оно физически не может
+        быть параллельным (см. `_execute_stop_voice_command`).
+
         Доменные ошибки (`bot.errors.BotError`, например `NothingPlayingError`
         на «пауза», когда ничего не играет) перехватываются здесь и
         превращаются в их же `user_message` — голосовая команда не должна
-        ронять распознавание речи исключением. После любого действия,
-        меняющего состояние плеера (`_VOICE_COMMANDS_UPDATE_PLAYER_MESSAGE`),
-        сообщение-плеер обновляется тем же `_update_player_message()`, что и
+        ронять распознавание речи исключением. Ошибки самого голосового
+        ответа (синтез недоступен, бот ещё не подключился и т. п.) сюда не
+        доходят вовсе — `_speak_voice_reply` перехватывает их сама, потому
+        что произнесённая реплика — украшение, а не часть команды. После
+        любого действия, меняющего состояние плеера
+        (`_VOICE_COMMANDS_UPDATE_PLAYER_MESSAGE`), сообщение-плеер
+        обновляется тем же `_update_player_message()`, что и
         кнопки/slash-команды, только без интеракции — её у голосовой команды
         нет.
+
+        `_speak_voice_reply` передана первым аргументом `gather`, а
+        `_dispatch_voice_command` — вторым, и порядок здесь важен, а не
+        стилистический выбор: `asyncio.gather` создаёт задачи в порядке
+        перечисления аргументов и планирует их через `loop.call_soon`, из-за
+        чего первая переданная корутина получает первый шаг выполнения
+        раньше второй. Требование пользователя — чтобы человек слышал
+        подтверждение «сразу, как только команда распознана», то есть
+        синтез и произнесение реплики обязаны начать работу первыми, а не
+        после того, как `_dispatch_voice_command` уже добежит до своего
+        первого `await`.
         """
+        if command.action == "stop":
+            return await self._execute_stop_voice_command(command, speaker)
+
+        try:
+            _, reply = await asyncio.gather(
+                self._speak_voice_reply(command),
+                self._dispatch_voice_command(command, speaker),
+            )
+        except BotError as exc:
+            logger.warning("Ошибка голосовой команды %s: %s", command.action, exc)
+            return exc.user_message
+        if command.action in self._VOICE_COMMANDS_UPDATE_PLAYER_MESSAGE:
+            await self._update_player_message()
+        return reply
+
+    async def _execute_stop_voice_command(
+        self, command: VoiceCommand, speaker: discord.Member | None
+    ) -> str:
+        """Выполняет `stop` строго последовательно: сначала прощание, потом отключение.
+
+        Единственное исключение из общей параллельности `execute_voice_command`,
+        и оно неизбежно физически, а не по недосмотру: `stop` разрывает
+        голосовое соединение, а договорить фразу после разрыва соединения
+        уже некуда — отправлять аудио будет некому. Поэтому сначала
+        пробуем произнести прощание (и ждём его — иначе отключение,
+        случившееся быстрее синтеза, оборвало бы фразу на полуслове), и
+        только потом отключаемся по-настоящему.
+        """
+        await self._speak_voice_reply(command)
         try:
             reply = await self._dispatch_voice_command(command, speaker)
         except BotError as exc:
@@ -582,6 +677,58 @@ class MusicCog(commands.Cog, name="Музыка"):
         if command.action in self._VOICE_COMMANDS_UPDATE_PLAYER_MESSAGE:
             await self._update_player_message()
         return reply
+
+    async def _speak_voice_reply(self, command: VoiceCommand) -> None:
+        """Озвучивает короткую реплику на голосовую команду (см. `bot.voice_replies`).
+
+        Голосовой ответ — украшение поверх команды, а не её часть, поэтому
+        любая накладка при его подготовке или произнесении (синтез
+        отключён/недоступен, модель ещё не скачана, бот только что
+        подключается к каналу и ещё не готов говорить — та же гонка, что и
+        `say`/`_dispatch_voice_command`, выполняемые здесь же параллельно)
+        тихо проглатывается: команда должна выполниться как обычно, а не
+        упасть из-за того, что бот не смог сказать пару слов в ответ.
+
+        У `repeat` отдельного ответа нет: бот и так произносит запрошенный
+        текст внутри `_dispatch_voice_command`, вторая реплика была бы
+        лишней. У `now_playing` к выбранной фразе добавляется название
+        текущего трека.
+
+        Реплика никогда не ждёт загрузку модели синтеза. Замер показал: сама
+        загрузка занимает 5.5 секунды и на 3.2 секунды из них ПОЛНОСТЬЮ
+        замораживает цикл событий (ONNX держит GIL, вынос в поток через
+        `asyncio.to_thread` внутри `TextToSpeech.ensure_ready` от этого не
+        спасает) — если бы `synthesize()` ниже сама вызвала `ensure_ready()`
+        на неготовой модели, именно первая голосовая команда после старта
+        бота попала бы в эту заморозку и превратилась в те самые двенадцать
+        секунд молчания из живого лога. `cog_load`/`_warm_up_tts` грузят
+        модель заранее в фоне, пока бот ещё ничем не занят; если прогрев не
+        успел завершиться к моменту команды — лучше промолчать, чем
+        подвесить бота ровно в момент, когда он должен мгновенно ответить.
+        """
+        if not self._config.tts_enabled or not self._config.voice_replies:
+            return
+        if command.action == "repeat":
+            return
+        if not self._tts.is_ready:
+            logger.debug(
+                "Голосовой ответ на команду %s пропущен: модель синтеза ещё не готова",
+                command.action,
+            )
+            return
+        phrase = pick_reply(command.action)
+        if phrase is None:
+            return
+        try:
+            if command.action == "now_playing":
+                phrase = f"{phrase} {self._player.now_playing().track.display}"
+            pcm = await self._tts.synthesize(phrase)
+            if pcm:
+                await self._player.say(pcm)
+        except BotError as exc:
+            logger.debug(
+                "Голосовой ответ на команду %s не произнесён: %s", command.action, exc
+            )
 
     async def _dispatch_voice_command(
         self, command: VoiceCommand, speaker: discord.Member | None
@@ -837,16 +984,20 @@ class MusicCog(commands.Cog, name="Музыка"):
 
         Общая точка для текстовой команды `/say` и голосовой «Катя, повтори
         …» — чтобы обе вели себя одинаково и не разъехались при правках.
-        Возвращается именно очищенный текст (схлопнутые пробелы, обрезка по
-        длине, см. `bot.tts.clean_text`), а не исходный: человек должен
-        видеть в подтверждении ровно то, что бот сказал вслух.
+
+        Возвращается не исходный текст, а тот, который бот произнёс на
+        самом деле (см. `bot.tts.speakable_text`): синтез умеет только
+        русские буквы, поэтому цифры он проговаривает словами, а латиницу
+        произносит по звучанию — «Nirvana» звучит как «нирвана». Показать в
+        подтверждении исходное написание значило бы умолчать об этом
+        превращении ровно там, где человек и слышит непохожее произношение.
         """
         if not self._config.tts_enabled:
             raise SpeechSynthesisUnavailableError(
                 "Синтез речи отключён настройкой TTS_ENABLED.",
                 user_message="Синтез речи отключён на этом сервере.",
             )
-        spoken = clean_text(text)
+        spoken = speakable_text(clean_text(text))
         if not spoken:
             raise NothingToSayError("Пустой текст для произнесения.")
         pcm = await self._tts.synthesize(spoken)

@@ -39,6 +39,7 @@ def _make_config() -> Config:
         tts_enabled=True,
         tts_model_name="vosk-model-tts-ru-0.7-multi",
         tts_speaker_id=2,
+        voice_replies=True,
     )
 
 

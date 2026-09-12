@@ -50,6 +50,7 @@ class Config:
     tts_enabled: bool
     tts_model_name: str
     tts_speaker_id: int
+    voice_replies: bool
 
     @property
     def secrets(self) -> tuple[str, ...]:
@@ -211,6 +212,12 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
     if tts_speaker_id < 0:
         raise ConfigError("Переменная окружения TTS_SPEAKER_ID не может быть отрицательной.")
 
+    # Голосовые ответы бота на голосовые команды («Пауза», «Далее» и т. п.,
+    # см. bot.voice_replies) — украшение поверх самих команд, а не их часть.
+    # Включены по умолчанию вместе с TTS_ENABLED; выключаются отдельно, если
+    # нужна только сама голосовая команда без болтовни бота в ответ.
+    voice_replies = _parse_bool_env("VOICE_REPLIES", default=True)
+
     return Config(
         discord_token=discord_token,
         guild_id=guild_id,
@@ -229,4 +236,5 @@ def load_config(env_file: str | os.PathLike[str] | None = ".env") -> Config:
         tts_enabled=tts_enabled,
         tts_model_name=tts_model_name,
         tts_speaker_id=tts_speaker_id,
+        voice_replies=voice_replies,
     )
