@@ -101,6 +101,9 @@ class VoiceControlCog(commands.Cog, name="Голосовое управлени�
         )
         self._model_unavailable_logged = False
         self._speech_disabled = False
+        # Фоновый прогрев модели распознавания — см. `cog_load` про то,
+        # почему ленивая загрузка при первом подключении к каналу негодна.
+        self._model_warmup_task: asyncio.Task[None] | None = None
         # Ссылки на фоновые задачи обработки фраз — см. докстринг `_handle_phrase`
         # про то, почему обработка не идёт прямо в колбэке, и `_process_phrase`
         # про сам дедлок. `asyncio` хранит на задачи только слабые ссылки:
@@ -116,9 +119,79 @@ class VoiceControlCog(commands.Cog, name="Голосовое управлени�
         """Связывает ког с уже созданным `MusicCog` — нужен для выполнения голосовых команд."""
         self._music_cog = music_cog
 
+    async def cog_load(self) -> None:
+        """Начинает прогрев модели распознавания заранее, фоновой задачей.
+
+        Без прогрева модель грузится лениво — при первом подключении к
+        голосовому каналу, внутри `GuildListener.attach`, а тот вызывается
+        из хука `on_player_voice_connected`, который `GuildPlayer.connect()`
+        ДОЖИДАЕТСЯ (см. `bot/player.py`). То есть время загрузки целиком
+        ложится на команду, открывающую волну.
+
+        С малой моделью это незаметно (замерено: 0.5–1.5 с), а с большой —
+        нет. Для `vosk-model-ru-0.42` загрузка занимает около 146 секунд, и
+        прогретый кэш файловой системы не помогает (147 с холодная против
+        146 с повторная — время уходит не на чтение с диска, а на сборку
+        графа декодирования). Ленивая загрузка означала бы, что первый
+        `/wave` после каждого запуска бота висит две с половиной минуты, а
+        трёхсекундное окно ответа Discord на interaction протухает задолго
+        до конца — человек получает «Приложение не ответило вовремя».
+
+        Поэтому модель грузится сразу при старте, когда бот ещё ничем не
+        занят. Задача фоновая: заминка при старте никому не мешает, зато
+        `ensure_ready()` идемпотентен и защищён своим локом — если кто-то
+        успеет позвать бота в канал раньше, чем прогрев закончится,
+        `attach()` дождётся ТОЙ ЖЕ загрузки, а не запустит вторую.
+
+        Та же болезнь и то же лекарство, что у синтеза речи, — см.
+        `MusicCog.cog_load` про то, почему ленивая загрузка «при первой
+        фразе» уже однажды подвела.
+        """
+        if self._speech_disabled:
+            return
+        self._model_warmup_task = asyncio.create_task(self._warm_up_model())
+
+    async def _warm_up_model(self) -> None:
+        """Грузит модель распознавания заранее; неудача отключает голосовое управление.
+
+        Обработка `SpeechModelUnavailableError` намеренно повторяет
+        `on_player_voice_connected`: сообщение в лог ОДИН раз за процесс и
+        `_speech_disabled`, после чего бот остаётся полноценным музыкальным
+        ботом без голосовых команд. Дублирования сообщения при этом не
+        будет — тот же флаг `_model_unavailable_logged` проверяют оба места.
+        """
+        started_at = time.perf_counter()
+        try:
+            await self._recognizer.ensure_ready()
+            logger.info(
+                "Модель распознавания речи готова за %.1f с", time.perf_counter() - started_at
+            )
+        except SpeechModelUnavailableError as exc:
+            if not self._model_unavailable_logged:
+                logger.warning(
+                    "Голосовое управление отключено на время работы бота: %s", exc.user_message
+                )
+                self._model_unavailable_logged = True
+            self._speech_disabled = True
+        except Exception:
+            # `asyncio.CancelledError` сюда не попадёт: с Python 3.8 она
+            # наследуется от BaseException, поэтому отмена из `cog_unload`
+            # пролетает наружу сама, без отдельной ветки.
+            logger.exception("Не удалось заранее загрузить модель распознавания речи")
+
     async def cog_unload(self) -> None:
         """Останавливает приём голоса, отладочную запись и фоновые задачи при выгрузке кога."""
         await self._listener.detach()
+        # Прогрев отменяется первым, чтобы выгрузка кога не ждала загрузку
+        # модели. Важная оговорка: отменяется только ОЖИДАНИЕ — сам поток
+        # `asyncio.to_thread` внутри `ensure_ready` прервать нельзя, он
+        # дочитает модель до конца. Потоки пула по умолчанию не демоны, и
+        # остановка бота в первые ~2.5 минуты после старта всё равно
+        # подождёт их на выходе из интерпретатора.
+        if self._model_warmup_task is not None and not self._model_warmup_task.done():
+            self._model_warmup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._model_warmup_task
         for task in list(self._background_tasks):
             if not task.done():
                 task.cancel()

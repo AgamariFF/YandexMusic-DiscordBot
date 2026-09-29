@@ -1,6 +1,5 @@
 """Tests for bot.yandex.wave module."""
 
-
 import pytest
 
 from bot.errors import WaveUnavailableError, YandexAuthError
@@ -32,9 +31,7 @@ class FakeMusicClient:
             return batch
         return WaveBatch(batch_id=None, tracks=())
 
-    async def fetch_session_tracks(
-        self, *, queue: list[str], feedbacks: list[dict]
-    ) -> WaveBatch:
+    async def fetch_session_tracks(self, *, queue: list[str], feedbacks: list[dict]) -> WaveBatch:
         """Запрашивает следующую пачку треков с фидбеком."""
         self.calls.append(("fetch_session_tracks", queue, feedbacks))
         if self.fetch_handler is not None:
@@ -60,7 +57,7 @@ def make_track(track_id, title="Song", feedback_id=None):
         title=title,
         artists="Artist",
         duration=180.0,
-            cover_url="https://example.com/cover.jpg",
+        cover_url="https://example.com/cover.jpg",
         raw=None,
     )
 
@@ -142,8 +139,7 @@ class TestWaveSessionStart:
         # Проверяем содержимое фидбеков в правильном порядке
         types = [f["event"]["type"] for f in feedbacks]
         assert types == ["trackStarted", "trackFinished", "skip"], (
-            f"Фидбеки должны быть в порядке (trackStarted, trackFinished, skip), "
-            f"получено {types}"
+            f"Фидбеки должны быть в порядке (trackStarted, trackFinished, skip), получено {types}"
         )
 
         # Проверяем что очередь фидбеков пуста после flush (не буфер треков!)
@@ -317,6 +313,7 @@ class TestWaveSessionUpcoming:
         preview = session.upcoming(2)
 
         from bot.yandex.wave import MAX_BUFFERED_TRACKS
+
         assert len(preview) <= MAX_BUFFERED_TRACKS
         buffered_before = session.buffered
         session.upcoming(5)
@@ -370,6 +367,7 @@ class TestWaveSessionUpcoming:
         preview = session.upcoming(100)
 
         from bot.yandex.wave import MAX_BUFFERED_TRACKS
+
         assert len(preview) <= MAX_BUFFERED_TRACKS
 
 
@@ -463,9 +461,7 @@ class TestWaveSessionFeedback:
         assert len(feedbacks) > 0
         played_seconds = feedbacks[0]["event"]["totalPlayedSeconds"]
         # Проверяем что это дробное, не целое (не 22.0)
-        assert played_seconds == 22.434, (
-            f"Должно быть 22.434 (3 знака), получено {played_seconds}"
-        )
+        assert played_seconds == 22.434, f"Должно быть 22.434 (3 знака), получено {played_seconds}"
         # Дополнительная проверка: не целое число
         assert played_seconds != int(played_seconds), (
             f"Значение должно быть дробным, а не целым: {played_seconds}"
@@ -503,6 +499,7 @@ class TestWaveSessionBatchId:
         4. Финальный ретрай возвращает batch_id="batch-2" с 1 треком
         5. batch_id никогда не должна быть None
         """
+
         async def fake_sleep(_):
             return None
 
@@ -612,13 +609,9 @@ class TestWaveSessionSkipAndAdaptation:
                     found_skip_feedback = True
                     break
 
-        assert found_skip_feedback, (
-            "Фидбек пропуска должен быть отправлен с fetch_session_tracks"
-        )
+        assert found_skip_feedback, "Фидбек пропуска должен быть отправлен с fetch_session_tracks"
 
-        non_empty_send_feedbacks = [
-            c for c in send_feedbacks_calls if len(c[1]) > 0
-        ]
+        non_empty_send_feedbacks = [c for c in send_feedbacks_calls if len(c[1]) > 0]
         assert len(non_empty_send_feedbacks) == 0, (
             "send_feedbacks с непустым списком не должен быть вызван: "
             "фидбек должен уйти с fetch_session_tracks"
@@ -638,6 +631,7 @@ class TestWaveSessionSkipAndAdaptation:
         3. Второй next_track(): fetch возвращает B, extract B,
            _refresh_chain вызывает fetch(queue=["b"])
         """
+
         async def fake_sleep(_):
             return None
 
@@ -725,6 +719,7 @@ class TestWaveSessionSkipAndAdaptation:
         и MAX_FETCH_ATTEMPTS исчерпаны, верни трек в любом случае (даже дубликат)
         вместо ошибки. Музыка не должна остановиться из-за логики дедупликации.
         """
+
         async def fake_sleep(_):
             return None
 
@@ -827,6 +822,7 @@ class TestWaveSessionNetworkResilience:
     @pytest.mark.asyncio
     async def test_network_error_retried_then_succeeds(self, monkeypatch):
         """Сетевой сбой на попытках 1-2 не убивает волну: ретрай → успех на попытке 3."""
+
         async def fake_sleep(_):
             return None
 
@@ -855,6 +851,7 @@ class TestWaveSessionNetworkResilience:
     @pytest.mark.asyncio
     async def test_all_fetch_attempts_fail_raises_error(self, monkeypatch):
         """Все MAX_FETCH_ATTEMPTS попыток неудачны → WaveUnavailableError."""
+
         async def fake_sleep(_):
             return None
 
@@ -936,6 +933,7 @@ class TestWaveSessionNetworkResilience:
         со следующей успешной попытки. Одно нечётное падение обеспечивает
         видимость одного разворота: без reversed тест упадёт.
         """
+
         async def fake_sleep(_):
             return None
 
@@ -974,8 +972,7 @@ class TestWaveSessionNetworkResilience:
         fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
         feedback_calls = [c for c in fetch_calls if len(c[2]) == 3]
         assert len(feedback_calls) >= 2, (
-            "Должно быть минимум 2 попытки отправить фидбеки "
-            "(первая падает, вторая успешна)"
+            "Должно быть минимум 2 попытки отправить фидбеки (первая падает, вторая успешна)"
         )
 
         successfully_sent = feedback_calls[-1]
@@ -1086,8 +1083,13 @@ class TestWaveSessionBufferingConstraints:
 
         first_batch = WaveBatch(
             batch_id="batch1",
-            tracks=(make_track("a"), make_track("b"), make_track("c"),
-                    make_track("d"), make_track("e")),
+            tracks=(
+                make_track("a"),
+                make_track("b"),
+                make_track("c"),
+                make_track("d"),
+                make_track("e"),
+            ),
         )
         second_batch = WaveBatch(
             batch_id="batch2",
@@ -1173,8 +1175,7 @@ class TestWaveSessionFeedbackContent:
 
         fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
         feedbacks_with_started = [
-            f for f in fetch_calls[-1][2]
-            if f.get("event", {}).get("type") == "trackStarted"
+            f for f in fetch_calls[-1][2] if f.get("event", {}).get("type") == "trackStarted"
         ]
         assert len(feedbacks_with_started) > 0
         # Проверяем что trackId содержит feedback_id, а не просто id
@@ -1201,8 +1202,7 @@ class TestWaveSessionFeedbackContent:
 
         fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
         feedbacks_with_finished = [
-            f for f in fetch_calls[-1][2]
-            if f.get("event", {}).get("type") == "trackFinished"
+            f for f in fetch_calls[-1][2] if f.get("event", {}).get("type") == "trackFinished"
         ]
         assert len(feedbacks_with_finished) > 0
         assert feedbacks_with_finished[0]["event"]["trackId"] == "333:444"
@@ -1225,8 +1225,7 @@ class TestWaveSessionFeedbackContent:
 
         fetch_calls = [c for c in client.calls if c[0] == "fetch_session_tracks"]
         feedbacks_with_skip = [
-            f for f in fetch_calls[-1][2]
-            if f.get("event", {}).get("type") == "skip"
+            f for f in fetch_calls[-1][2] if f.get("event", {}).get("type") == "skip"
         ]
         assert len(feedbacks_with_skip) > 0
         assert feedbacks_with_skip[0]["event"]["trackId"] == "555:666"
@@ -1257,9 +1256,7 @@ class TestWaveSessionDescription:
         client = FakeMusicClient()
         client.batches_to_return = [batch]
 
-        session = WaveSession(
-            client, seeds=["track:123"], track_to_start_from="123"
-        )
+        session = WaveSession(client, seeds=["track:123"], track_to_start_from="123")
         await session.start()
 
         # Проверяем что вызов был с правильными параметрами
@@ -1294,3 +1291,184 @@ class TestWaveSessionDescription:
         start_session_call = [c for c in client.calls if c[0] == "start_session"][0]
         assert start_session_call[1] == ["station:my_wave"]
         assert start_session_call[2] is None
+
+
+class TestWaveSessionFirstTrack:
+    """Тесты для параметра first_track."""
+
+    @pytest.mark.asyncio
+    async def test_first_track_none_default_behavior(self):
+        """first_track=None → поведение как раньше, буфер заполняется первой пачкой."""
+        batch = WaveBatch(batch_id="batch1", tracks=(make_track("1"),))
+        client = FakeMusicClient()
+        client.batches_to_return = [batch]
+        session = WaveSession(client, first_track=None)
+
+        await session.start()
+
+        assert session.buffered > 0, "При first_track=None буфер должен быть заполнен из пачки"
+
+    @pytest.mark.asyncio
+    async def test_first_track_mismatch_replaces_buffer(self):
+        """first_track задан и не совпадает с первым треком пачки → буфер содержит
+        ровно first_track.
+        """
+        from bot.yandex.wave import MAX_BUFFERED_TRACKS
+
+        first_track = make_track("forced", "Forced Track")
+        batch_track = make_track("1", "Batch Track")
+        batch = WaveBatch(batch_id="batch1", tracks=(batch_track,))
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch]
+        session = WaveSession(client, first_track=first_track)
+
+        await session.start()
+
+        assert session.buffered == 1, (
+            f"После start() с first_track, не совпадающим с пачкой, "
+            f"буфер должен содержать ровно 1 трек (первый next_track() вернёт "
+            f"first_track), получено {session.buffered}"
+        )
+        assert session.buffered <= MAX_BUFFERED_TRACKS
+
+        track = await session.next_track()
+        assert track.id == "forced", (
+            f"Первый next_track() должен вернуть first_track, получено {track.id}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_track_empty_batch_uses_first_track(self):
+        """first_track задан и пачка пуста → буфер содержит ровно [first_track], start()
+        НЕ бросает исключение.
+        """
+        from bot.yandex.wave import MAX_BUFFERED_TRACKS
+
+        first_track = make_track("forced", "Forced Track")
+        empty_batch = WaveBatch(batch_id=None, tracks=())
+
+        client = FakeMusicClient()
+        client.batches_to_return = [empty_batch]
+        session = WaveSession(client, first_track=first_track)
+
+        await session.start()
+
+        assert session.buffered == 1, (
+            f"При пустой пачке и first_track, буфер должен содержать "
+            f"ровно first_track (1 трек), получено {session.buffered}"
+        )
+        assert session.buffered <= MAX_BUFFERED_TRACKS
+
+        track = await session.next_track()
+        assert track.id == "forced", (
+            f"next_track() должен вернуть first_track даже при пустой пачке, получено {track.id}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_track_matches_batch_no_substitution(self):
+        """first_track задан и совпадает с первым треком пачки по id → подстановки нет,
+        буфер остаётся как из пачки, трек не дублируется.
+        """
+        first_track = make_track("1", "Track 1")
+        batch_track = make_track("1", "Track 1")  # Совпадает по id
+        batch = WaveBatch(batch_id="batch1", tracks=(batch_track,))
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch]
+        session = WaveSession(client, first_track=first_track)
+
+        await session.start()
+
+        # Буфер должен быть как обычно (из пачки, не подменён)
+        assert session.buffered >= 1, "Буфер должен содержать треки из пачки"
+
+        track = await session.next_track()
+        assert track.id == "1", (
+            f"next_track() должен вернуть трек из пачки (он совпадает с first_track), "
+            f"получено {track.id}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_track_not_duplicated_from_recent(self):
+        """Подставленный first_track попадает в _recent штатно и не приходит повторно
+        из следующей пачки (проверяется через публичное поведение next_track()).
+
+        Сценарий:
+        1. start() с first_track, не совпадающим с пачкой → буфер = [first_track]
+        2. next_track() возвращает first_track, добавляет его в _recent
+        3. Следующий fetch возвращает пачку с тем же first_track и новым треком
+        4. Второй next_track() должен пропустить дубликат и вернуть новый трек
+        """
+        first_track = make_track("forced", "Forced Track")
+        batch1_track = make_track("1", "Batch Track")
+        new_track = make_track("2", "New Track")
+
+        batch1 = WaveBatch(batch_id="batch1", tracks=(batch1_track,))
+        batch2 = WaveBatch(batch_id="batch2", tracks=(first_track, new_track))
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch1, batch2]
+        session = WaveSession(client, first_track=first_track)
+
+        await session.start()
+
+        t1 = await session.next_track()
+        assert t1.id == "forced", (
+            f"Первый next_track() должен вернуть first_track, получено {t1.id}"
+        )
+
+        t2 = await session.next_track()
+        assert t2.id == "2", (
+            f"Второй next_track() должен вернуть новый трек (дубликат "
+            f"first_track отфильтрован), получено {t2.id}. "
+            f"Если получен '1' или 'forced', значит дедупликация не работает."
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_track_buffer_respects_max_constraint(self):
+        """При использовании first_track, буфер никогда не превышает MAX_BUFFERED_TRACKS."""
+        from bot.yandex.wave import MAX_BUFFERED_TRACKS
+
+        first_track = make_track("forced", "Forced Track")
+        batch = WaveBatch(
+            batch_id="batch1",
+            tracks=(make_track("1"), make_track("2"), make_track("3")),
+        )
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch]
+        session = WaveSession(client, first_track=first_track)
+
+        await session.start()
+
+        assert session.buffered <= MAX_BUFFERED_TRACKS, (
+            f"Буфер превышает MAX_BUFFERED_TRACKS={MAX_BUFFERED_TRACKS}, "
+            f"получено {session.buffered}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_track_with_seeds_and_track_to_start_from(self):
+        """first_track не влияет на передачу seeds и track_to_start_from в
+        client.start_session().
+        """
+        first_track = make_track("forced", "Forced Track")
+        batch = WaveBatch(batch_id="batch1", tracks=(make_track("1"),))
+
+        client = FakeMusicClient()
+        client.batches_to_return = [batch]
+        session = WaveSession(
+            client,
+            seeds=["track:123"],
+            track_to_start_from="123",
+            first_track=first_track,
+        )
+
+        await session.start()
+
+        start_session_call = [c for c in client.calls if c[0] == "start_session"][0]
+        assert start_session_call[1] == ["track:123"], (
+            "seeds должны быть переданы несмотря на first_track"
+        )
+        assert start_session_call[2] == "123", (
+            "track_to_start_from должен быть передан несмотря на first_track"
+        )

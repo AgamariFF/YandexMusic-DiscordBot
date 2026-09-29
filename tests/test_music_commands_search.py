@@ -16,6 +16,9 @@ def create_mock_interaction():
     interaction = AsyncMock(spec=discord.Interaction)
     interaction.response = AsyncMock()
     interaction.response.defer = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.response.send_message = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
     interaction.followup = AsyncMock()
     interaction.followup.send = AsyncMock()
     interaction.channel = MagicMock()
@@ -806,3 +809,85 @@ class TestAllowedMentionsProtection:
         interaction.delete_original_response.assert_called_once()
         # Проверяем, что on_select был вызван (он получает interaction и track)
         on_select.assert_called_once()
+
+
+def _create_expired_not_found() -> discord.NotFound:
+    """Create discord.NotFound with code 10062 (expired interaction window)."""
+    response_mock = MagicMock()
+    response_mock.status = 404
+    message_dict = {"code": 10062, "message": "Unknown interaction"}
+    return discord.NotFound(response_mock, message_dict)
+
+
+class TestTrackSearchViewExpiredInteraction:
+    """Тесты для TrackSearchView при истекшем окне interaction (код 10062)."""
+
+    @pytest.mark.asyncio
+    async def test_handle_selection_recovers_from_expired_window_and_stays_alive(self):
+        """После истечения окна меню остаётся живым и второй клик работает.
+
+        Сценарий: первый клик имеет истекшее окно (10062), второй клик нормальный.
+        Ожидаемо: первый клик не бросает исключение, on_select не вызывается,
+        после первого клика меню работает, второй клик вызывает on_select ровно один раз.
+        """
+        tracks = (
+            TrackInfo(
+                id="track1",
+                feedback_id="track1:album1",
+                title="Test Song",
+                artists="Test Artist",
+                duration=180.0,
+                cover_url="https://example.com/cover.jpg",
+                raw=None,
+            ),
+            TrackInfo(
+                id="track2",
+                feedback_id="track2:album2",
+                title="Another Song",
+                artists="Another Artist",
+                duration=200.0,
+                cover_url="https://example.com/cover.jpg",
+                raw=None,
+            ),
+        )
+
+        on_select = AsyncMock()
+        view = TrackSearchView(tracks=tracks, author_id=12345, on_select=on_select)
+
+        # === First interaction: expired window ===
+        expired_interaction = AsyncMock()
+        expired_interaction.response = AsyncMock()
+        expired_interaction.response.defer = AsyncMock(
+            side_effect=_create_expired_not_found()
+        )
+        expired_interaction.channel = MagicMock()
+        expired_interaction.channel.send = AsyncMock()
+
+        # First click should not raise an exception
+        await view.handle_selection(expired_interaction, tracks[0])
+
+        # on_select should NOT have been called
+        on_select.assert_not_called()
+
+        # A warning message should have been sent to the channel
+        expired_interaction.channel.send.assert_called_once()
+        warning_message = expired_interaction.channel.send.call_args[0][0]
+        assert warning_message is not None
+
+        # === Second interaction: normal, after expired ===
+        normal_interaction = AsyncMock()
+        normal_interaction.response = AsyncMock()
+        normal_interaction.response.defer = AsyncMock()
+        normal_interaction.response.edit_message = AsyncMock()
+        normal_interaction.delete_original_response = AsyncMock()
+
+        # Second click should work normally
+        await view.handle_selection(normal_interaction, tracks[1])
+
+        # on_select should now be called exactly once (from the second click)
+        on_select.assert_called_once()
+        call_args = on_select.call_args
+        selected_track = call_args[0][1]
+        assert selected_track.id == "track2", (
+            f"Expected track2, got {selected_track.id}"
+        )

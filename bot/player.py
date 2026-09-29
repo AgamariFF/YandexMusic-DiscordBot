@@ -238,17 +238,21 @@ class GuildPlayer:
         """Запускает волну от конкретного трека: сначала сам трек, затем похожие на него.
 
         Станция волны — `track:<id трека>` (без id альбома, здесь именно
-        `TrackInfo.id`), а `track_to_start_from=track.id` — то самое поле,
-        из-за которого сессия отдаёт запрошенный трек ПЕРВЫМ (см. docstring
-        `YandexMusicClient.start_session`). Поэтому отдельного
-        воспроизведения трека вне волны не нужно: волна с этими параметрами
-        и есть «сам трек, потом волна от него». Описание волны для UI — без
-        длительности из `track.display`, только артисты и название.
+        `TrackInfo.id`), а `track_to_start_from=track.id` передаётся как
+        штатный путь — сервер может учесть его и поставить запрошенный
+        трек первым сам. Но полагаться на это нельзя: гарантию того, что
+        первым сыграет именно `track`, а не похожий на него, даёт
+        `first_track=track`, переданный в `WaveSession` (см. её docstring
+        `start()`). Поэтому отдельного воспроизведения трека вне волны не
+        нужно: волна с этими параметрами и есть «сам трек, потом волна от
+        него». Описание волны для UI — без длительности из
+        `track.display`, только артисты и название.
         """
         session = WaveSession(
             self._client,
             seeds=[f"track:{track.id}"],
             track_to_start_from=track.id,
+            first_track=track,
             description=f"Моя волна по {track.artists} — {track.title}",
         )
         return await self._start_wave_with_session(session)

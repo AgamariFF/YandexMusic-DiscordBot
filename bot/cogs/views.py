@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 
 import discord
 
+from bot.cogs.interactions import notify_window_expired, safe_defer
 from bot.errors import BotError
 from bot.yandex import TrackInfo
 
@@ -144,26 +145,40 @@ class TrackSearchView(discord.ui.View):
         выбора в чате оставался только плеер, поэтому вместо правки текста
         меню теперь: пустой `defer()` (взаимодействию нужен хоть какой-то
         ответ) и удаление самого сообщения меню — см. `_delete_message`.
+
+        Порядок операций принципиален. `safe_defer` вызывается самым первым,
+        ещё до проверки `self._handled` — раньше `self._handled = True` и
+        `_disable_all_items()` выставлялись ДО `defer()`, и при истёкшем окне
+        ответа меню портилось необратимо (кнопки disabled, `self.stop()` уже
+        вызван), а пользователь при этом получал «повторите» — повторить
+        было уже физически нечем. Теперь при истёкшем окне состояние
+        `self._handled` не трогается вовсе и меню остаётся рабочим.
+
+        Проверка `self._handled` и присвоение ей `True` идут сразу вслед за
+        успешным `defer()` без единого `await` между ними (следом сразу
+        `_disable_all_items()`) — так закрыта гонка двух кликов,
+        обработавшихся параллельно (см. комментарий в `__init__` про
+        `self._handled`): переключение на другую задачу event loop возможно
+        только на `await`, а между проверкой и присвоением его нет.
+
+        `notify_window_expired` вызывается только если это не гонка с уже
+        обработанным (другим) кликом — иначе пользователь получил бы
+        «повторите» на клик, который на самом деле уже отработал через
+        параллельный, и в чате осталось бы сразу два таких предупреждения.
         """
+        if not await safe_defer(interaction):
+            if not self._handled:
+                await notify_window_expired(
+                    interaction, action="выбор трека из результатов поиска"
+                )
+            return
         if self._handled:
-            # Уже обрабатывается или обработан другим (более ранним) выбором —
-            # волну повторно не запускаем и сообщение не трогаем. Но совсем
-            # без ответа на это взаимодействие нельзя: Discord ждёт ответ
-            # около трёх секунд и без него покажет пользователю "Interaction
-            # failed", хотя на самом деле всё в порядке — первый выбор
-            # обрабатывается штатно. Поэтому отвечаем пустым defer().
-            if not interaction.response.is_done():
-                try:
-                    await interaction.response.defer()
-                except discord.HTTPException:
-                    # Взаимодействие уже само протухло к этому моменту —
-                    # ронять обработку из-за этого не нужно.
-                    pass
+            # Уже обработан другим (более ранним) кликом, пока этот ждал свой
+            # defer(), — волну повторно не запускаем, меню не трогаем.
             return
         self._handled = True
         self._disable_all_items()
         try:
-            await interaction.response.defer()
             await self._delete_message(interaction)
             await self._on_select(interaction, track)
         except BotError as exc:

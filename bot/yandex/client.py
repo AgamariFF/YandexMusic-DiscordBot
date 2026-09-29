@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -161,6 +162,22 @@ def build_radio_started_feedback(from_: str = FEEDBACK_FROM) -> dict[str, Any]:
 class YandexMusicClient:
     """Асинхронная обёртка над неофициальным API Яндекс.Музыки (сессионный rotor «Моя волна»)."""
 
+    # `resolve_stream_url` делает два сетевых запроса (ссылка на скачивание,
+    # затем прямая ссылка на поток), и оба наблюдались отвечающими `429 Too
+    # Many Requests` — переходящей ошибкой: в логе фиксировались десятки
+    # подряд идущих 429, а соседний запрос того же вида через доли секунды
+    # уже проходил. Без повторной попытки единственный 429 означает потерю
+    # ИМЕННО ТОГО трека, который вызывающая сторона попросила воспроизвести
+    # (например, трек, найденный командой «найди трек X»): плеер штатно
+    # считает недоступный трек пропущенным и берёт следующий из волны — то
+    # есть бот молча подменяет запрошенный пользователем трек чужим.
+    # Значения (3 попытки, 0.5/1.0 c между ними) и сама схема нарастающей
+    # задержки — тот же приём, что и в `WaveSession.next_track`
+    # (`MAX_FETCH_ATTEMPTS`/`RETRY_DELAY_SECONDS`), чтобы не плодить второй
+    # стиль ретраев в проекте.
+    STREAM_URL_MAX_ATTEMPTS = 3
+    STREAM_URL_RETRY_DELAY_SECONDS = 0.5
+
     def __init__(self, token: str, *, station: str = WAVE_STATION_ID) -> None:
         """Запоминает токен Яндекса и идентификатор станции волны."""
         self._token = token
@@ -242,16 +259,22 @@ class YandexMusicClient:
         поведение «Моей волны» от станции пользователя. Для волны от
         конкретного трека вызывающая сторона передаёт `seeds=["track:<id
         трека>"]` и одновременно `track_to_start_from` — это ОТДЕЛЬНОЕ поле
-        `trackToStartFrom` тела запроса, а не часть `seeds`. Его роль
-        принципиальна и неочевидна из кода: проверено вживую, что именно
-        `trackToStartFrom` заставляет запрошенный трек стать ПЕРВЫМ в выдаче
-        сессии — без него волна стартует с похожего, но другого трека.
-        Официальное приложение этого поля вообще не использует (оно
-        проигрывает выбранный трек локально, а волну запускает уже отдельно
-        от станции, см. docs/rotor-session-api.md) — не удаляйте параметр как
-        «неофициальный» или «лишний»: именно через него бот получает связку
-        «сначала сам выбранный трек, потом волна от него» одним запросом,
-        без отдельного локального воспроизведения трека вне волны.
+        `trackToStartFrom` тела запроса, а не часть `seeds`. Сервер это поле
+        принимает: 6 сентября 2026 оно ставило запрошенный трек первым в
+        `sequence` ответа, и наблюдение 25 сентября 2026 на живом боте это
+        подтвердило — запрошенный трек снова пришёл первым. Но поле
+        недокументированное и неофициальное: само приложение им вообще не
+        пользуется (оно проигрывает выбранный трек локально, а у волны
+        просит уже отдельное продолжение, см. docs/rotor-session-api.md) —
+        мы всё равно отправляем его как штатный путь, удалять незачем, но
+        полагаться на него как на ЕДИНСТВЕННУЮ гарантию порядка нельзя:
+        недокументированное поведение сервера может измениться без
+        предупреждения. Страховкой служит подстановка на стороне клиента —
+        параметр `first_track` в `WaveSession.start()` (см.
+        docs/rotor-session-api.md): она срабатывает, только если сервер
+        порядок всё же не соблюдёт, и в этом случае пишет об этом в лог —
+        именно так и будет замечена смена поведения API, если она когда-нибудь
+        произойдёт.
         """
         client = self._require_client()
         url = f"{client.base_url}/rotor/session/new"
@@ -527,34 +550,49 @@ class YandexMusicClient:
         )
 
     async def resolve_stream_url(self, track: TrackInfo) -> str:
-        """Возвращает прямую ссылку на аудиопоток лучшего доступного качества."""
+        """Возвращает прямую ссылку на аудиопоток лучшего доступного качества.
+
+        Оба сетевых вызова внутри (получение списка доступных потоков и
+        получение прямой ссылки у выбранного) обёрнуты повторными попытками
+        на переходящих ошибках (`YandexMusicError`, `OSError`, в первую
+        очередь `429 Too Many Requests`) — см. `STREAM_URL_MAX_ATTEMPTS` и
+        комментарий над ним о том, почему это важно именно здесь.
+        `UnauthorizedError` не ретраим: это не переходящая ошибка, а
+        признак недействительного токена, повторные попытки её не исправят.
+        """
         self._require_client()
-        try:
-            infos = await track.raw.get_download_info_async()
-        except UnauthorizedError as exc:
-            logger.error(
-                "Не удалось получить ссылку на поток трека %s: %s: %s",
-                track.id,
-                type(exc).__name__,
-                exc,
-            )
-            raise YandexAuthError() from exc
-        except YandexMusicError as exc:
-            logger.warning(
-                "Не удалось получить ссылку на поток трека %s: %s: %s",
-                track.id,
-                type(exc).__name__,
-                exc,
-            )
-            raise TrackUnavailableError() from exc
-        except OSError as exc:
-            logger.warning(
-                "Не удалось получить ссылку на поток трека %s: %s: %s",
-                track.id,
-                type(exc).__name__,
-                exc,
-            )
-            raise TrackUnavailableError() from exc
+
+        infos = None
+        for attempt in range(1, self.STREAM_URL_MAX_ATTEMPTS + 1):
+            try:
+                infos = await track.raw.get_download_info_async()
+                break
+            except UnauthorizedError as exc:
+                logger.error(
+                    "Не удалось получить ссылку на поток трека %s: %s: %s",
+                    track.id,
+                    type(exc).__name__,
+                    exc,
+                )
+                raise YandexAuthError() from exc
+            except (YandexMusicError, OSError) as exc:
+                if attempt < self.STREAM_URL_MAX_ATTEMPTS:
+                    logger.warning(
+                        "Попытка %d получить ссылку на поток трека %s не удалась: %s: %s",
+                        attempt,
+                        track.id,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    await asyncio.sleep(self.STREAM_URL_RETRY_DELAY_SECONDS * 2 ** (attempt - 1))
+                    continue
+                logger.warning(
+                    "Не удалось получить ссылку на поток трека %s: %s: %s",
+                    track.id,
+                    type(exc).__name__,
+                    exc,
+                )
+                raise TrackUnavailableError() from exc
 
         candidates = [info for info in infos if not info.preview]
         if not candidates:
@@ -568,26 +606,35 @@ class YandexMusicClient:
             "Выбран поток трека %s: codec=%s bitrate=%s", track.id, best.codec, best.bitrate_in_kbps
         )
 
-        try:
-            return await best.get_direct_link_async()
-        except UnauthorizedError as exc:
-            # Текст исключения может содержать подписанную ссылку — логируем только тип.
-            logger.error(
-                "Не удалось получить прямую ссылку на трек %s: %s", track.id, type(exc).__name__
-            )
-            raise YandexAuthError() from exc
-        except YandexMusicError as exc:
-            # Текст исключения может содержать подписанную ссылку — логируем только тип.
-            logger.warning(
-                "Не удалось получить прямую ссылку на трек %s: %s", track.id, type(exc).__name__
-            )
-            raise TrackUnavailableError() from exc
-        except OSError as exc:
-            # Текст исключения может содержать подписанную ссылку — логируем только тип.
-            logger.warning(
-                "Не удалось получить прямую ссылку на трек %s: %s", track.id, type(exc).__name__
-            )
-            raise TrackUnavailableError() from exc
+        for attempt in range(1, self.STREAM_URL_MAX_ATTEMPTS + 1):
+            try:
+                return await best.get_direct_link_async()
+            except UnauthorizedError as exc:
+                # Текст исключения может содержать подписанную ссылку — логируем только тип.
+                logger.error(
+                    "Не удалось получить прямую ссылку на трек %s: %s",
+                    track.id,
+                    type(exc).__name__,
+                )
+                raise YandexAuthError() from exc
+            except (YandexMusicError, OSError) as exc:
+                if attempt < self.STREAM_URL_MAX_ATTEMPTS:
+                    # Текст исключения может содержать подписанную ссылку — логируем только тип.
+                    logger.warning(
+                        "Попытка %d получить прямую ссылку на трек %s не удалась: %s",
+                        attempt,
+                        track.id,
+                        type(exc).__name__,
+                    )
+                    await asyncio.sleep(self.STREAM_URL_RETRY_DELAY_SECONDS * 2 ** (attempt - 1))
+                    continue
+                # Текст исключения может содержать подписанную ссылку — логируем только тип.
+                logger.warning(
+                    "Не удалось получить прямую ссылку на трек %s: %s",
+                    track.id,
+                    type(exc).__name__,
+                )
+                raise TrackUnavailableError() from exc
 
     async def close(self) -> None:
         """Идемпотентно освобождает внутренний клиент."""

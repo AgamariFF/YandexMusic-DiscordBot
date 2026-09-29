@@ -19,6 +19,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.cogs.interactions import notify_window_expired, respond, safe_defer
 from bot.cogs.roulette_view import RouletteView
 from bot.config import Config
 from bot.errors import BotError, NotInVoiceChannelError
@@ -214,26 +215,36 @@ class RouletteCog(commands.Cog, name="Чат-рулетка"):
         Публичное сообщение-статус к этому моменту уже отправил колбэк
         `_update_status_message` (сработал изнутри `GuildRoulette.start()`
         при переходе в состояние "идёт поиск"), а на само взаимодействие
-        всё равно нужно ответить.
+        всё равно нужно ответить. `clear_view=True` — как и в
+        `MusicCog._send_started_ack`: если ответ уже редактировался раньше,
+        от этого не должно остаться следов.
         """
         text = "Чат-рулетка запущена — смотрите сообщение-статус в канале."
-        if interaction.response.is_done():
-            try:
-                await interaction.edit_original_response(content=text, embed=None, view=None)
-            except discord.HTTPException:  # NotFound — её подкласс
-                await interaction.followup.send(text, ephemeral=True)
-        else:
-            await interaction.response.send_message(text, ephemeral=True)
+        await respond(interaction, text, clear_view=True)
 
     async def handle_next(self, interaction: discord.Interaction) -> None:
-        """Обрабатывает нажатие кнопки «Следующий» на сообщении-статусе."""
-        await interaction.response.defer()
+        """Обрабатывает нажатие кнопки «Следующий» на сообщении-статусе.
+
+        Если окно ответа успело закрыться (см. `bot.cogs.interactions.safe_defer`),
+        команда не выполняется вовсе: дальнейший `followup`/`edit_message` всё
+        равно упал бы 404, а тихо пропустить нажатие значило бы сделать вид,
+        что кнопка сработала.
+        """
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="нажатие кнопки «Следующий»")
+            return
         await self._roulette.next_peer()
         await self._update_status_message(interaction)
 
     async def handle_stop(self, interaction: discord.Interaction) -> None:
-        """Обрабатывает нажатие кнопки «Стоп» на сообщении-статусе."""
-        await interaction.response.defer()
+        """Обрабатывает нажатие кнопки «Стоп» на сообщении-статусе.
+
+        См. `handle_next` про то, почему при истёкшем окне ответа команда не
+        выполняется дальше.
+        """
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="нажатие кнопки «Стоп»")
+            return
         await self._roulette.stop()
         await self._update_status_message(interaction)
 
@@ -259,28 +270,19 @@ class RouletteCog(commands.Cog, name="Чат-рулетка"):
 
         if isinstance(original, BotError):
             logger.warning("Ошибка команды /%s: %s", command_name, original)
-            await self._send_error(interaction, original.user_message)
+            await respond(interaction, original.user_message)
             return
 
         logger.error("Необработанная ошибка команды /%s", command_name, exc_info=original)
-        await self._send_error(interaction, "Внутренняя ошибка, подробности в логах.")
-
-    @staticmethod
-    async def _send_error(interaction: discord.Interaction, text: str) -> None:
-        """Отправляет текст ошибки с учётом того, был ли ответ уже начат (в т.ч. отложен)."""
-        if interaction.response.is_done():
-            try:
-                await interaction.edit_original_response(content=text)
-            except discord.HTTPException:  # NotFound — её подкласс
-                await interaction.followup.send(text, ephemeral=True)
-        else:
-            await interaction.response.send_message(text, ephemeral=True)
+        await respond(interaction, "Внутренняя ошибка, подробности в логах.")
 
     @app_commands.command(name="roulette", description="Начать голосовую чат-рулетку")
     @app_commands.guild_only()
     async def roulette_start(self, interaction: discord.Interaction) -> None:
         """Останавливает волну, подключается к каналу вызвавшего и начинает поиск собеседника."""
-        await interaction.response.defer(ephemeral=True)
+        if not await safe_defer(interaction, ephemeral=True):
+            await notify_window_expired(interaction, action="/roulette")
+            return
         channel = _voice_channel_of(interaction)
         await self._ensure_music_stopped()
         self._announce_channel = interaction.channel
@@ -293,7 +295,9 @@ class RouletteCog(commands.Cog, name="Чат-рулетка"):
     @app_commands.guild_only()
     async def roulette_next(self, interaction: discord.Interaction) -> None:
         """Завершает разговор с текущим собеседником и ищет нового."""
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="/roulette_next")
+            return
         await self._roulette.next_peer()
         await interaction.followup.send("Ищу нового собеседника.")
         await self._update_status_message(interaction)
@@ -304,7 +308,9 @@ class RouletteCog(commands.Cog, name="Чат-рулетка"):
     @app_commands.guild_only()
     async def roulette_stop(self, interaction: discord.Interaction) -> None:
         """Останавливает чат-рулетку и отключает бота от голосового канала."""
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="/roulette_stop")
+            return
         await self._roulette.stop()
         await interaction.followup.send("Чат-рулетка остановлена, бот отключился от канала.")
         await self._update_status_message(interaction)

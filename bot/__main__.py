@@ -11,7 +11,7 @@ import discord
 from discord.ext import commands
 
 from bot.cogs.music import MusicCog
-from bot.cogs.roulette import RouletteCog
+from bot.cogs.player_view import PlayerView
 from bot.cogs.voice_control import VoiceControlCog
 from bot.config import Config, load_config
 from bot.errors import ConfigError, YandexAuthError
@@ -70,6 +70,19 @@ class WaveBot(commands.Bot):
         )
         await self.add_cog(music_cog)
 
+        # Персистентная регистрация кнопок плеера. Кладёт обработчики в
+        # ViewStore под message_id=None — запасной поиск `dispatch_view`
+        # обращается к ним, когда по конкретному сообщению ничего не нашлось.
+        # Без этого кнопки знало только то сообщение-плеер, которое успел
+        # создать текущий процесс, а нажатие на плеер от прошлого запуска
+        # бота молча проваливалось: ответа на interaction не было вовсе, и
+        # Discord показывал «Приложение не ответило вовремя», не оставляя
+        # следа в логе. Экземпляр здесь ничему не прикреплён, его собственный
+        # вид (подписи, disabled) не используется — работает он только как
+        # точка входа диспетчера, а состояние обработчики читают из плеера в
+        # момент нажатия. Подробности — в докстринге PlayerView.
+        self.add_view(PlayerView(player=music_cog.player, controller=music_cog))
+
         if voice_control_cog is not None:
             voice_control_cog.bind_music_cog(music_cog)
             await self.add_cog(voice_control_cog)
@@ -97,15 +110,18 @@ class WaveBot(commands.Bot):
                 "SPEECH_ENABLED=0 — распознавание речи и голосовые команды отключены."
             )
 
-        if self._config.nekto_token:
-            roulette_cog = RouletteCog(self, self._config, music_cog.player)
-            await self.add_cog(roulette_cog)
-            logger.info("Чат-рулетка включена.")
-        else:
-            logger.info(
-                "NEKTO_TOKEN не задан — команды чат-рулетки отключены, "
-                "остальной функционал бота не затронут."
-            )
+        # Чат-рулетка (nekto.me) отключена целиком и намеренно: ког
+        # `bot.cogs.roulette.RouletteCog` здесь больше не регистрируется, поэтому
+        # бот не заводит ни slash-команд `/roulette*`, ни соединений с nekto.me —
+        # независимо от того, заданы ли NEKTO_TOKEN/NEKTO_USER_AGENT в окружении.
+        # Код рулетки (`bot/roulette.py`, `bot/cogs/roulette*.py`, сетевая часть
+        # `bot/nekto/`) оставлен в репозитории и не удалён — чтобы включить фичу
+        # обратно, достаточно вернуть сюда импорт RouletteCog и его регистрацию.
+        # Отдельно: `bot/nekto/audio.py` — не сетевой модуль, а ресемплинг PCM,
+        # он по-прежнему используется TTS и распознаванием речи.
+        logger.info(
+            "Чат-рулетка (nekto.me) отключена в коде — команды /roulette* не регистрируются."
+        )
 
         if diagnostics_enabled():
             logger.info(

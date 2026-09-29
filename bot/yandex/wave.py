@@ -60,6 +60,7 @@ class WaveSession:
         *,
         seeds: list[str] | None = None,
         track_to_start_from: str | None = None,
+        first_track: TrackInfo | None = None,
         description: str = DEFAULT_WAVE_DESCRIPTION,
     ) -> None:
         """Запоминает клиент, параметры запуска волны и инициализирует пустое состояние сессии.
@@ -72,10 +73,22 @@ class WaveSession:
         без дублирования логики буферизации и фидбека. `description` — не
         влияет на поведение сессии вообще, это чисто человекочитаемая
         подпись для UI (см. свойство `description`).
+
+        `first_track` — подстраховка поверх `track_to_start_from`. Поле
+        `trackToStartFrom` в API существует и когда-то было проверено
+        вживую, но гарантии не даёт: сервер может отдать первым похожий
+        трек вместо запрошенного (см. docs/rotor-session-api.md).
+        Официальное приложение это поле вообще не передаёт — оно играет
+        выбранный трек само, локально, и просит у волны только
+        продолжение. `first_track` — тот же путь, что у приложения, но без
+        отдельного локального воспроизведения: выбранный трек остаётся
+        полноценным элементом волны и проходит через буфер как обычно (см.
+        `start()`, где и происходит собственно подстановка).
         """
         self._client = client
         self._seeds = seeds
         self._track_to_start_from = track_to_start_from
+        self._first_track = first_track
         self._description = description
         self._buffer: deque[TrackInfo] = deque()
         self._pending_feedbacks: deque[dict[str, Any]] = deque(maxlen=MAX_PENDING_FEEDBACKS)
@@ -137,6 +150,24 @@ class WaveSession:
         прокидываются в `client.start_session(...)` как есть: именно они
         отличают волну от конкретного трека от обычной «Моей волны» (см.
         docstring `__init__`).
+
+        Если задан `first_track`, ниже гарантируется, что буфер начинается
+        именно с него. `track_to_start_from` существует в API и когда-то
+        был проверен вживую, но гарантии не даёт — сервер может отдать
+        первым похожий трек, а не запрошенный; официальное приложение
+        этого поля вообще не передаёт, оно играет выбранный трек само и
+        просит у волны только продолжение (см. docs/rotor-session-api.md).
+        Подстановка ниже — тот же путь, что у приложения, только выбранный
+        трек остаётся полноценным элементом волны, а не отдельным
+        локальным воспроизведением: он выдаётся через обычный
+        `next_track()` и штатно попадёт в `_recent`. Если сервер уже
+        поставил его первым сам, переподставлять не нужно — иначе трек
+        сыграл бы дважды, поэтому подстановка срабатывает только когда
+        `batch.tracks` пуст либо её первый элемент не совпадает с
+        `first_track` по id. Заодно пустая первая пачка при заданном
+        `first_track` перестаёт быть тупиком: трек всё равно играем, а
+        хвост цепочки подтянет `_refresh_chain` при следующем вызове
+        `next_track()`.
         """
         batch = await self._client.start_session(
             seeds=self._seeds, track_to_start_from=self._track_to_start_from
@@ -147,6 +178,16 @@ class WaveSession:
         self._recent.clear()
         self._batch_id = batch.batch_id
         self._buffer.extend(batch.tracks[:MAX_BUFFERED_TRACKS])
+        if self._first_track is not None and (
+            not batch.tracks or batch.tracks[0].id != self._first_track.id
+        ):
+            logger.info(
+                "Сервер не поставил запрошенный трек первым (trackToStartFrom не сработал), "
+                "подставляем его принудительно: id=%s",
+                self._first_track.id,
+            )
+            self._buffer.clear()
+            self._buffer.append(self._first_track)
         self._started = True
         logger.info(
             "Сессия «Моей волны» запущена, получено треков: %d, в буфере: %d",

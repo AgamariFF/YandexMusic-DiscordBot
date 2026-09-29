@@ -15,6 +15,7 @@ from typing import Protocol
 
 import discord
 
+from bot.cogs.interactions import respond
 from bot.errors import BotError
 from bot.roulette import GuildRoulette, RouletteStatus
 
@@ -33,17 +34,6 @@ class RouletteController(Protocol):
     async def handle_next(self, interaction: discord.Interaction) -> None: ...
 
     async def handle_stop(self, interaction: discord.Interaction) -> None: ...
-
-
-async def _respond_component_error(interaction: discord.Interaction, text: str) -> None:
-    """Отправляет текст ошибки компонента с учётом того, был ли уже отправлен ответ."""
-    try:
-        if interaction.response.is_done():
-            await interaction.followup.send(text, ephemeral=True)
-        else:
-            await interaction.response.send_message(text, ephemeral=True)
-    except discord.HTTPException:
-        logger.warning("Не удалось отправить сообщение об ошибке компонента чат-рулетки")
 
 
 class RouletteView(discord.ui.View):
@@ -110,16 +100,20 @@ class RouletteView(discord.ui.View):
         """Общая обработка нажатий: доменные ошибки — пользователю, остальное — в лог и в чат.
 
         См. `PlayerView._run` — та же схема: ошибки компонентов не доходят
-        до `cog_app_command_error` кога (он ловит только ошибки slash-команд).
+        до `cog_app_command_error` кога (он ловит только ошибки slash-команд),
+        и та же причина `prefer_followup=True` — `response` к этому моменту
+        мог быть израсходован на `edit_message` с публичным сообщением-статусом.
         """
         try:
             await action(interaction)
         except BotError as exc:
             logger.warning("Ошибка кнопки чат-рулетки: %s", exc)
-            await _respond_component_error(interaction, exc.user_message)
+            await respond(interaction, exc.user_message, prefer_followup=True)
         except Exception:
             logger.exception("Необработанная ошибка кнопки чат-рулетки")
-            await _respond_component_error(interaction, "Внутренняя ошибка, подробности в логах.")
+            await respond(
+                interaction, "Внутренняя ошибка, подробности в логах.", prefer_followup=True
+            )
 
 
 class NextButton(discord.ui.Button["RouletteView"]):

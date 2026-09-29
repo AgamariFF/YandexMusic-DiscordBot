@@ -14,12 +14,20 @@ import asyncio
 import math
 import sys
 import types
+from unittest.mock import patch
 
 import pytest
 
 from bot.errors import SpeechSynthesisUnavailableError
 from bot.nekto.audio import DISCORD_CHANNELS, DISCORD_SAMPLE_RATE, DISCORD_SAMPLE_WIDTH
-from bot.tts import MAX_TEXT_LENGTH, MODEL_SAMPLE_RATE, TextToSpeech, clean_text
+from bot.tts import (
+    MAX_TEXT_LENGTH,
+    MODEL_SAMPLE_RATE,
+    SPEECH_GAIN,
+    TextToSpeech,
+    _amplify_pcm,
+    clean_text,
+)
 
 
 def _tone(seconds: float, freq: int = 220, amplitude: int = 9000) -> array.array:
@@ -205,3 +213,107 @@ class TestFailures:
         _install_fake_vosk_tts(monkeypatch, BrokenSynth())
         with pytest.raises(SpeechSynthesisUnavailableError):
             await TextToSpeech().synthesize("привет")
+
+
+class TestAmplifyPcm:
+    """Усиление амплитуды моно-PCM: отсчёты, насыщение, граничные случаи."""
+
+    def test_scales_samples(self):
+        """Каждый отсчёт домножается на коэффициент усиления.
+
+        Например при gain=1.5 отсчёт 1000 становится 1500, отсчёт -1000
+        становится -1500. Проверяется базовое поведение без насыщения.
+        """
+        pcm = array.array("h", [1000, -1000, 500]).tobytes()
+        result = _amplify_pcm(pcm, 1.5)
+        samples = array.array("h")
+        samples.frombytes(result)
+        assert list(samples) == [1500, -1500, 750]
+
+    def test_clamps_at_upper_bound(self):
+        """Отсчёт, вышедший за верхнюю границу int16, обрезается до 32767.
+
+        При gain=1.5 отсчёт 30000 даёт 32767 (а не переполнение).
+        Это ключевой тест: переполнение вместо насыщения даёт грубый треск.
+        """
+        pcm = array.array("h", [30000]).tobytes()
+        result = _amplify_pcm(pcm, 1.5)
+        samples = array.array("h")
+        samples.frombytes(result)
+        assert samples[0] == 32767
+
+    def test_clamps_at_lower_bound(self):
+        """Отсчёт, вышедший за нижнюю границу int16, обрезается до -32768.
+
+        При gain=1.5 отсчёт -30000 даёт -32768 (а не переполнение).
+        Симметричная проверка верхней границы.
+        """
+        pcm = array.array("h", [-30000]).tobytes()
+        result = _amplify_pcm(pcm, 1.5)
+        samples = array.array("h")
+        samples.frombytes(result)
+        assert samples[0] == -32768
+
+    def test_unit_gain_returns_input_unchanged(self):
+        """При gain=1.0 функция возвращает входной bytes без изменений.
+
+        Быстрый путь: вход не должен ни разу пройти по циклу усиления.
+        Проверяется побайтовое равенство.
+        """
+        pcm = array.array("h", [1000, -500, 32767, -32768]).tobytes()
+        result = _amplify_pcm(pcm, 1.0)
+        assert result == pcm
+        assert result is pcm
+
+    def test_empty_input_gives_empty_output(self):
+        """Пустой bytes на входе даёт пустой bytes на выходе."""
+        result = _amplify_pcm(b"", 1.5)
+        assert result == b""
+
+    def test_odd_length_drops_trailing_byte(self):
+        """Хвостовой непарный байт отбрасывается, результат чётной длины.
+
+        Для s16 каждый отсчёт — 2 байта, поэтому нечётная длина —
+        повреждённые данные. Функция должна отбросить хвост, а не упасть.
+        """
+        pcm = array.array("h", [1000, -500]).tobytes() + b"\x00"
+        result = _amplify_pcm(pcm, 1.5)
+        assert len(result) % 2 == 0
+        samples = array.array("h")
+        samples.frombytes(result)
+        assert list(samples) == [1500, -750]
+
+    def test_speech_gain_value(self):
+        """Константа SPEECH_GAIN в модуле равна 2.25 (страховка от регрессии)."""
+        assert SPEECH_GAIN == 2.25
+
+    def test_speech_gain_stays_below_clipping_ceiling(self):
+        """Усиление не должно превышать безопасный потолок по амплитуде синтеза.
+
+        Замерено на живом синтезе: сырой моно-PCM модели пикует на 29–40%
+        шкалы int16, то есть самые «громкие» фразы упираются в клиппинг
+        около x2.5. Граница здесь — не догадка, а страховка: поднять
+        громкость ещё можно, но выше этой отметки уже придётся заново
+        мерить запас, а не крутить константу на глаз.
+        """
+        assert SPEECH_GAIN <= 2.5
+
+    @pytest.mark.asyncio
+    async def test_amplification_applied_during_synthesis(self, monkeypatch):
+        """`_synthesize_sync` пропускает звук модели через усиление с `SPEECH_GAIN`.
+
+        Проверка коэффициента стоит ПОСЛЕ синтеза, а не внутри подменённой
+        функции: та выполняется в рабочем потоке (`asyncio.to_thread`), и
+        поднятый там `AssertionError` был бы превращён `synthesize` в
+        `SpeechSynthesisUnavailableError` — тест прошёл бы даже при
+        подставленном мимо константы коэффициенте, то есть ровно при той
+        регрессии, от которой он и поставлен.
+        """
+        synth = FakeSynth(_tone(0.1))
+        _install_fake_vosk_tts(monkeypatch, synth)
+
+        with patch("bot.tts._amplify_pcm", wraps=_amplify_pcm) as amplify:
+            await TextToSpeech().synthesize("привет")
+
+        assert amplify.call_count == 1
+        assert amplify.call_args[0][1] == SPEECH_GAIN

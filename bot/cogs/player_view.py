@@ -13,10 +13,27 @@ from typing import Protocol
 
 import discord
 
+from bot.cogs.interactions import respond
 from bot.errors import BotError
 from bot.player import GuildPlayer, PlayerState
 
 logger = logging.getLogger(__name__)
+
+#: Общий префикс `custom_id` всех кнопок сообщения-плеера. По нему нажатие
+#: узнаётся как «плеерное» в местах, где самого вью уже нет под рукой, —
+#: сейчас это слушатель `MusicCog.on_interaction`, отличающий нажатие на
+#: устаревшее сообщение-плеер от компонентов других вью (меню выбора трека).
+PLAYER_CUSTOM_ID_PREFIX = "player:"
+
+#: `custom_id` каждой кнопки ряда. Фиксированные, а не сгенерированные
+#: discord.py случайно (`os.urandom(16).hex()`), — это обязательное условие
+#: персистентности: `Client.add_view` отказывается регистрировать вью, у
+#: которого хоть один компонент не получил `custom_id` явно, а `ViewStore`
+#: ищет обработчик именно по паре (тип компонента, `custom_id`).
+PAUSE_CUSTOM_ID = f"{PLAYER_CUSTOM_ID_PREFIX}pause"
+SKIP_CUSTOM_ID = f"{PLAYER_CUSTOM_ID_PREFIX}skip"
+SEARCH_CUSTOM_ID = f"{PLAYER_CUSTOM_ID_PREFIX}search"
+DISCONNECT_CUSTOM_ID = f"{PLAYER_CUSTOM_ID_PREFIX}disconnect"
 
 
 class PlayerController(Protocol):
@@ -38,40 +55,43 @@ class PlayerController(Protocol):
     async def handle_search_query(self, interaction: discord.Interaction, query: str) -> None: ...
 
 
-async def _respond_component_error(interaction: discord.Interaction, text: str) -> None:
-    """Отправляет текст ошибки компонента с учётом того, был ли уже отправлен ответ."""
-    try:
-        if interaction.response.is_done():
-            await interaction.followup.send(text, ephemeral=True)
-        else:
-            await interaction.response.send_message(text, ephemeral=True)
-    except discord.HTTPException:
-        logger.warning("Не удалось отправить сообщение об ошибке компонента плеера")
-
-
 class PlayerView(discord.ui.View):
     """Постоянный ряд кнопок управления сообщением-плеером.
 
     `timeout=None`: волна живёт неопределённо долго, и по времени кнопкам
     отключаться незачем — они и так пересобираются заново при каждом
-    обновлении сообщения (см. `MusicCog._update_player_message`). Вид кнопок
-    (подпись паузы/продолжения, disabled в остановленном состоянии) читается
-    из `player` один раз при создании конкретного экземпляра — ровно перед
-    тем, как он прикрепляется к отредактированному или новому сообщению.
+    обновлении сообщения (см. `MusicCog._update_player_message`).
 
-    Кнопка поиска — исключение: она не отключается в остановленном
+    Вью персистентный: `timeout=None` плюс фиксированные `custom_id` у всех
+    кнопок (см. константы модуля) и одна регистрация `bot.add_view(...)` при
+    старте (`bot.__main__.WaveBot.setup_hook`). Это не косметика, а лечение
+    конкретного сбоя: раньше `custom_id` генерировались случайно на каждый
+    экземпляр, поэтому диспетчер discord.py знал только те кнопки, которые
+    успел зарегистрировать текущий процесс. Нажатие на сообщение-плеер от
+    прошлого запуска бота (а оно остаётся висеть в канале) не находило
+    обработчика, и `ViewStore.dispatch_view` молча выходил по `item is None`
+    — бот не отвечал на interaction вообще, и Discord показывал человеку
+    «Приложение не ответило вовремя», не оставляя при этом ни строчки в логе.
+
+    Регистрация при старте кладёт обработчики в `ViewStore` под
+    `message_id=None`, а `dispatch_view` обращается к этой записи запасным
+    поиском, когда по конкретному `message_id` ничего не нашлось. Поэтому
+    кнопки работают на любом сообщении-плеере, включая созданные прошлым
+    процессом. Экземпляры, которые `MusicCog._update_player_message`
+    по-прежнему создаёт на каждую правку, регистрируются уже с конкретным
+    `message_id` и имеют приоритет — они нужны, чтобы вид кнопок
+    (подпись паузы/продолжения, disabled в остановленном состоянии) совпадал
+    с состоянием плеера на момент правки.
+
+    Состояние читается из `player` один раз при создании конкретного
+    экземпляра — ровно перед тем, как он прикрепляется к отредактированному
+    или новому сообщению. Персистентный экземпляр из `setup_hook` — исключение:
+    его собственный вид не используется никогда (он ничему не прикреплён и
+    служит только точкой входа диспетчера), а сами обработчики читают
+    актуальное состояние из `player`/контроллера в момент нажатия.
+
+    Кнопка поиска — отдельное исключение: она не отключается в остановленном
     состоянии, потому что именно ею запускается новая волна (см. `SearchButton`).
-
-    `timeout=None` не означает «работает вечно»: экземпляр и его callback'и
-    живут только в памяти текущего процесса бота. После перезапуска бота
-    старое сообщение-плеер и его кнопки на стороне Discord никуда не деваются,
-    но диспетчер discord.py уже не знает об этом `PlayerView` (он пересоздаётся
-    заново только когда сообщение-плеер обновляется явно, а не при старте
-    бота). Нажатие на кнопку такого «осиротевшего» сообщения даст пользователю
-    обычное «This interaction failed» — это не падение и не рассинхрон
-    данных, а ожидаемое следствие того, что вью не персистентны (нет
-    `bot.add_view()` с фиксированными `custom_id`, см. `MusicCog._replace_player_view`
-    про то, как экземпляры сменяют друг друга при жизни процесса).
     """
 
     def __init__(self, *, player: GuildPlayer, controller: PlayerController) -> None:
@@ -149,16 +169,23 @@ class PlayerView(discord.ui.View):
         Ошибки компонентов не доходят до `MusicCog.cog_app_command_error`
         (тот ловит только ошибки slash-команд), поэтому каждая кнопка сама
         решает, что показать пользователю, — как и `TrackSearchView.handle_selection`.
+
+        `respond(..., prefer_followup=True)`: к моменту ошибки `response`
+        нередко уже израсходован на `edit_message` с самим сообщением-плеером
+        (см. `MusicCog._update_player_message`), а оно публичное — обычный
+        `edit_original_response` правил бы именно его, и ошибку одного
+        нажатия увидели бы все слушатели. `prefer_followup` заставляет
+        `respond` всегда уходить в приватный `followup.send`.
         """
         try:
             await action(interaction)
         except BotError as exc:
             logger.warning("Ошибка кнопки плеера: %s", exc)
-            await _respond_component_error(interaction, exc.user_message)
+            await respond(interaction, exc.user_message, prefer_followup=True)
         except Exception:
             logger.exception("Необработанная ошибка кнопки плеера")
-            await _respond_component_error(
-                interaction, "Внутренняя ошибка, подробности в логах."
+            await respond(
+                interaction, "Внутренняя ошибка, подробности в логах.", prefer_followup=True
             )
 
 
@@ -170,7 +197,14 @@ class PauseResumeButton(discord.ui.Button["PlayerView"]):
         label = "Продолжить" if paused else "Пауза"
         emoji = "▶️" if paused else "⏸️"
         style = discord.ButtonStyle.success if paused else discord.ButtonStyle.secondary
-        super().__init__(label=label, emoji=emoji, style=style, disabled=disabled, row=0)
+        super().__init__(
+            label=label,
+            emoji=emoji,
+            style=style,
+            disabled=disabled,
+            row=0,
+            custom_id=PAUSE_CUSTOM_ID,
+        )
 
     async def callback(self, interaction: discord.Interaction) -> None:
         """Делегирует обработку нажатия владеющему `PlayerView`."""
@@ -191,6 +225,7 @@ class SkipButton(discord.ui.Button["PlayerView"]):
             style=discord.ButtonStyle.secondary,
             disabled=disabled,
             row=0,
+            custom_id=SKIP_CUSTOM_ID,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -216,6 +251,7 @@ class SearchButton(discord.ui.Button["PlayerView"]):
             emoji="🔍",
             style=discord.ButtonStyle.secondary,
             row=0,
+            custom_id=SEARCH_CUSTOM_ID,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -237,6 +273,7 @@ class DisconnectButton(discord.ui.Button["PlayerView"]):
             style=discord.ButtonStyle.danger,
             disabled=disabled,
             row=0,
+            custom_id=DISCONNECT_CUSTOM_ID,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -274,9 +311,9 @@ class SearchModal(discord.ui.Modal, title="Поиск трека"):
             await self._controller.handle_search_query(interaction, query)
         except BotError as exc:
             logger.warning("Ошибка поиска через модальное окно плеера: %s", exc)
-            await _respond_component_error(interaction, exc.user_message)
+            await respond(interaction, exc.user_message, prefer_followup=True)
         except Exception:
             logger.exception("Необработанная ошибка поиска через модальное окно плеера")
-            await _respond_component_error(
-                interaction, "Внутренняя ошибка, подробности в логах."
+            await respond(
+                interaction, "Внутренняя ошибка, подробности в логах.", prefer_followup=True
             )

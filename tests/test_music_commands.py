@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
+import discord.app_commands as app_commands
 import pytest
 
 from bot.cogs.music import MusicCog
@@ -382,6 +383,9 @@ def create_mock_interaction():
     interaction = AsyncMock(spec=discord.Interaction)
     interaction.response = AsyncMock()
     interaction.response.defer = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.response.send_message = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
     interaction.followup = AsyncMock()
     interaction.followup.send = AsyncMock()
     interaction.channel = MagicMock()
@@ -672,3 +676,169 @@ class TestMusicCogSendStartedAck:
         interaction.edit_original_response.assert_called_once()
         # Проверяем что followup НЕ был использован
         interaction.followup.send.assert_not_called()
+
+
+# ============================================================================
+# Integration tests: commands with expired interaction window
+# ============================================================================
+
+
+class TestMusicCogCommandsExpiredInteractionWindow:
+    """Интеграционные тесты команд при истёкшем окне ответа на interaction."""
+
+    @pytest.fixture
+    def cog_with_mocked_player(self, mock_bot, mock_config, mock_client, mock_player):
+        """Create MusicCog with mocked GuildPlayer."""
+        with patch("bot.cogs.music.GuildPlayer", return_value=mock_player):
+            cog = MusicCog(mock_bot, mock_config, mock_client)
+        assert cog.player is mock_player
+        return cog
+
+    def _create_expired_not_found(self) -> discord.NotFound:
+        """Create discord.NotFound with code 10062 (expired interaction window)."""
+        response_mock = MagicMock()
+        response_mock.status = 404
+        message_dict = {"code": 10062, "message": "Unknown interaction"}
+        return discord.NotFound(response_mock, message_dict)
+
+    @pytest.mark.asyncio
+    async def test_join_does_not_execute_when_defer_expires(
+        self, cog_with_mocked_player, mock_player
+    ):
+        """Команда /join не выполняется если окно ответа истекло."""
+        interaction = create_mock_interaction_with_member_in_voice()
+        # defer() бросает expired NotFound
+        interaction.response.defer = AsyncMock(side_effect=self._create_expired_not_found())
+        interaction.channel = AsyncMock()
+        interaction.channel.send = AsyncMock()
+
+        await cog_with_mocked_player.join.callback(cog_with_mocked_player, interaction)
+
+        # Проверяем что player.connect НЕ был вызван
+        mock_player.connect.assert_not_called()
+        # Проверяем что уведомление об истечении окна было отправлено в канал
+        interaction.channel.send.assert_called_once()
+        call_args = interaction.channel.send.call_args[0][0]
+        assert "/join" in call_args
+
+    @pytest.mark.asyncio
+    async def test_skip_does_not_execute_when_defer_expires(
+        self, cog_with_mocked_player, mock_player
+    ):
+        """Команда /skip не выполняется если окно ответа истекло."""
+        interaction = create_mock_interaction()
+        # defer() бросает expired NotFound
+        interaction.response.defer = AsyncMock(side_effect=self._create_expired_not_found())
+        interaction.channel = AsyncMock()
+        interaction.channel.send = AsyncMock()
+
+        await cog_with_mocked_player.skip.callback(cog_with_mocked_player, interaction)
+
+        # Проверяем что player.skip НЕ был вызван
+        mock_player.skip.assert_not_called()
+        # Проверяем что player.current не был запрошен
+        interaction.channel.send.assert_called_once()
+        call_args = interaction.channel.send.call_args[0][0]
+        assert "/skip" in call_args
+
+    @pytest.mark.asyncio
+    async def test_handle_skip_does_not_execute_when_defer_expires(
+        self, cog_with_mocked_player, mock_player
+    ):
+        """Кнопка handle_skip не выполняется если окно ответа истекло."""
+        interaction = create_mock_interaction()
+        # defer() бросает expired NotFound
+        interaction.response.defer = AsyncMock(side_effect=self._create_expired_not_found())
+        interaction.channel = AsyncMock()
+        interaction.channel.send = AsyncMock()
+
+        await cog_with_mocked_player.handle_skip(interaction)
+
+        # Проверяем что player.skip НЕ был вызван
+        mock_player.skip.assert_not_called()
+        # Проверяем что уведомление было отправлено
+        interaction.channel.send.assert_called_once()
+        call_args = interaction.channel.send.call_args[0][0]
+        assert "Следующий" in call_args
+
+    @pytest.mark.asyncio
+    async def test_handle_disconnect_does_not_execute_when_defer_expires(
+        self, cog_with_mocked_player, mock_player
+    ):
+        """Кнопка handle_disconnect не выполняется если окно ответа истекло."""
+        interaction = create_mock_interaction()
+        # defer() бросает expired NotFound
+        interaction.response.defer = AsyncMock(side_effect=self._create_expired_not_found())
+        interaction.channel = AsyncMock()
+        interaction.channel.send = AsyncMock()
+
+        await cog_with_mocked_player.handle_disconnect(interaction)
+
+        # Проверяем что player.disconnect НЕ был вызван
+        mock_player.disconnect.assert_not_called()
+        # Проверяем что уведомление было отправлено
+        interaction.channel.send.assert_called_once()
+        call_args = interaction.channel.send.call_args[0][0]
+        assert "Отключить" in call_args
+
+
+class TestMusicCogErrorHandlerOnDeadInteraction:
+    """Тесты для обработчика ошибок при мёртвом interaction."""
+
+    @pytest.fixture
+    def cog_with_mocked_player(self, mock_bot, mock_config, mock_client, mock_player):
+        """Create MusicCog with mocked GuildPlayer."""
+        with patch("bot.cogs.music.GuildPlayer", return_value=mock_player):
+            cog = MusicCog(mock_bot, mock_config, mock_client)
+        assert cog.player is mock_player
+        return cog
+
+    def _create_expired_not_found(self) -> discord.NotFound:
+        """Create discord.NotFound with code 10062."""
+        response_mock = MagicMock()
+        response_mock.status = 404
+        message_dict = {"code": 10062, "message": "Unknown interaction"}
+        return discord.NotFound(response_mock, message_dict)
+
+    @pytest.mark.asyncio
+    async def test_cog_app_command_error_does_not_raise_on_dead_interaction(
+        self, cog_with_mocked_player
+    ):
+        """cog_app_command_error не выполняет исключение при мёртвом interaction."""
+        from bot.errors import BotError
+
+        interaction = create_mock_interaction()
+        # response.send_message, followup.send, edit_original_response все падают с 10062
+        exc_expired = self._create_expired_not_found()
+        interaction.response.send_message = AsyncMock(side_effect=exc_expired)
+        interaction.response.is_done = MagicMock(return_value=True)
+        interaction.edit_original_response = AsyncMock(side_effect=exc_expired)
+        interaction.followup.send = AsyncMock(side_effect=exc_expired)
+
+        error = app_commands.AppCommandError(BotError("Test error"))
+
+        # Should not raise
+        try:
+            await cog_with_mocked_player.cog_app_command_error(interaction, error)
+        except Exception as e:
+            pytest.fail(f"cog_app_command_error должна не бросать исключение, получено {e}")
+
+    @pytest.mark.asyncio
+    async def test_cog_app_command_error_handles_user_facing_error_gracefully(
+        self, cog_with_mocked_player
+    ):
+        """cog_app_command_error обрабатывает пользовательскую ошибку при мёртвом interaction."""
+        from bot.errors import BotError
+
+        interaction = create_mock_interaction()
+        exc_expired = self._create_expired_not_found()
+        # respond будет пытаться отправить сообщение, все пути падают
+        interaction.response.send_message = AsyncMock(side_effect=exc_expired)
+        interaction.response.is_done = MagicMock(return_value=False)
+        interaction.followup.send = AsyncMock(side_effect=exc_expired)
+
+        user_error = BotError("User-facing error message")
+        error = app_commands.AppCommandError(user_error)
+
+        # Should not raise
+        await cog_with_mocked_player.cog_app_command_error(interaction, error)

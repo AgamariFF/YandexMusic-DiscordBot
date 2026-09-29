@@ -22,7 +22,7 @@ def make_track(track_id, title="Song", feedback_id=None):
         title=title,
         artists="Artist",
         duration=180.0,
-            cover_url="https://example.com/cover.jpg",
+        cover_url="https://example.com/cover.jpg",
         raw=None,
     )
 
@@ -46,9 +46,7 @@ class FakeMusicClient:
             return batch
         return WaveBatch(batch_id=None, tracks=())
 
-    async def fetch_session_tracks(
-        self, *, queue: list[str], feedbacks: list[dict]
-    ) -> WaveBatch:
+    async def fetch_session_tracks(self, *, queue: list[str], feedbacks: list[dict]) -> WaveBatch:
         """Fetch next batch of tracks."""
         self.calls.append(("fetch_session_tracks", queue, feedbacks))
         if self.batch_index < len(self.batches_to_return):
@@ -203,12 +201,15 @@ class TestPlayerStartWave:
 
         # Create and set up old session that will accumulate feedbacks
         old_session = AsyncMock(spec=WaveSession)
+
         async def track_skipped_side_effect(*args):
             call_order.append("track_skipped")
+
         old_session.track_skipped.side_effect = track_skipped_side_effect
 
         async def flush_side_effect():
             call_order.append("flush_pending_feedbacks")
+
         old_session.flush_pending_feedbacks.side_effect = flush_side_effect
         player._session = old_session
 
@@ -222,13 +223,16 @@ class TestPlayerStartWave:
 
         # Create new session that will replace old one
         new_session = AsyncMock(spec=WaveSession)
+
         async def new_session_init_side_effect():
             call_order.append("new_session_created")
+
         new_session.start = AsyncMock(side_effect=new_session_init_side_effect)
         new_session.next_track = AsyncMock(return_value=make_track("new_track"))
 
         # Patch WaveSession constructor to return our new_session
         import unittest.mock as mock_module
+
         with mock_module.patch("bot.player.WaveSession", return_value=new_session):
             await player.start_wave()
 
@@ -440,8 +444,13 @@ class TestPlaybackCallbackIdentity:
         # Set up player with a current track and source
         player._session = fake_session
         current_track = TrackInfo(
-            id="1", feedback_id="1:1", title="Current", artists="Artist", duration=100.0,
-            cover_url="https://example.com/cover.jpg", raw=None
+            id="1",
+            feedback_id="1:1",
+            title="Current",
+            artists="Artist",
+            duration=100.0,
+            cover_url="https://example.com/cover.jpg",
+            raw=None,
         )
         current_source = MagicMock()  # The actual current source
         current_source.elapsed = 50.0
@@ -486,9 +495,7 @@ class TestGuildPlayerStartWaveFromTrack:
         )
 
         fake_client = FakeMusicClient()
-        fake_client.batches_to_return = [
-            WaveBatch(batch_id="batch1", tracks=(track,))
-        ]
+        fake_client.batches_to_return = [WaveBatch(batch_id="batch1", tracks=(track,))]
 
         voice_client = MagicMock()
         voice_client.is_connected.return_value = True
@@ -505,9 +512,7 @@ class TestGuildPlayerStartWaveFromTrack:
         await player.start_wave_from_track(track)
 
         # Проверяем что была создана сессия с правильными параметрами
-        start_session_calls = [
-            c for c in fake_client.calls if c[0] == "start_session"
-        ]
+        start_session_calls = [c for c in fake_client.calls if c[0] == "start_session"]
         assert len(start_session_calls) > 0, "start_session должен быть вызван"
 
         seeds = start_session_calls[-1][1]
@@ -529,9 +534,7 @@ class TestGuildPlayerStartWaveFromTrack:
         )
 
         fake_client = FakeMusicClient()
-        fake_client.batches_to_return = [
-            WaveBatch(batch_id="batch1", tracks=(track,))
-        ]
+        fake_client.batches_to_return = [WaveBatch(batch_id="batch1", tracks=(track,))]
 
         voice_client = MagicMock()
         voice_client.is_connected.return_value = True
@@ -547,9 +550,7 @@ class TestGuildPlayerStartWaveFromTrack:
 
         await player.start_wave_from_track(track)
 
-        start_session_calls = [
-            c for c in fake_client.calls if c[0] == "start_session"
-        ]
+        start_session_calls = [c for c in fake_client.calls if c[0] == "start_session"]
         track_to_start_from = start_session_calls[-1][2]
         assert track_to_start_from == track.id, (
             f"track_to_start_from должен быть '{track.id}', получено {track_to_start_from}"
@@ -569,9 +570,7 @@ class TestGuildPlayerStartWaveFromTrack:
         )
 
         fake_client = FakeMusicClient()
-        fake_client.batches_to_return = [
-            WaveBatch(batch_id="batch1", tracks=(track,))
-        ]
+        fake_client.batches_to_return = [WaveBatch(batch_id="batch1", tracks=(track,))]
 
         voice_client = MagicMock()
         voice_client.is_connected.return_value = True
@@ -619,9 +618,7 @@ class TestGuildPlayerStartWaveFromTrack:
         )
 
         fake_client = FakeMusicClient()
-        fake_client.batches_to_return = [
-            WaveBatch(batch_id="batch1", tracks=(track,))
-        ]
+        fake_client.batches_to_return = [WaveBatch(batch_id="batch1", tracks=(track,))]
 
         voice_client = MagicMock()
         voice_client.is_connected.return_value = True
@@ -641,3 +638,54 @@ class TestGuildPlayerStartWaveFromTrack:
         assert description is not None
         assert "Artist" in description
         assert "Song" in description
+
+    @pytest.mark.asyncio
+    async def test_start_wave_from_track_passes_first_track(self, monkeypatch):
+        """start_wave_from_track() передаёт first_track в WaveSession."""
+        track = TrackInfo(
+            id="track123",
+            feedback_id="track123:album456",
+            title="Test Song",
+            artists="Test Artist",
+            duration=180.0,
+            cover_url="https://example.com/cover.jpg",
+            raw=None,
+        )
+
+        # Отслеживаем вызовы конструктора WaveSession
+        captured_kwargs = {}
+
+        original_wave_session = WaveSession
+
+        def mock_wave_session_init(client, **kwargs):
+            captured_kwargs.update(kwargs)
+            # Создаём реальный экземпляр для работы
+            return original_wave_session(client, **kwargs)
+
+        monkeypatch.setattr(
+            "bot.player.WaveSession",
+            lambda client, **kwargs: mock_wave_session_init(client, **kwargs),
+        )
+
+        fake_client = FakeMusicClient()
+        fake_client.batches_to_return = [WaveBatch(batch_id="batch1", tracks=(track,))]
+
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = False
+
+        player = GuildPlayer(
+            fake_client,
+            ffmpeg_path="ffmpeg",
+            default_volume=0.5,
+        )
+        player._voice_client = voice_client
+        player._channel = MagicMock()
+
+        await player.start_wave_from_track(track)
+
+        assert "first_track" in captured_kwargs, "WaveSession должна получить параметр first_track"
+        assert captured_kwargs["first_track"].id == track.id, (
+            f"first_track должен иметь id='{track.id}', "
+            f"получено {captured_kwargs['first_track'].id}"
+        )

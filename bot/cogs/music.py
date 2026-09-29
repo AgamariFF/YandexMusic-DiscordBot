@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Awaitable, Callable
 
 import discord
@@ -12,7 +13,8 @@ from discord import app_commands
 from discord.ext import commands, voice_recv
 
 from bot.audio.bassboost import BassLevel
-from bot.cogs.player_view import PlayerView
+from bot.cogs.interactions import notify_window_expired, respond, safe_defer
+from bot.cogs.player_view import PLAYER_CUSTOM_ID_PREFIX, PlayerView
 from bot.cogs.views import MAX_SEARCH_RESULTS, TrackSearchView, build_search_embed
 from bot.config import Config
 from bot.errors import (
@@ -200,8 +202,12 @@ class MusicCog(commands.Cog, name="Музыка"):
 
     async def _warm_up_tts(self) -> None:
         """Грузит модель синтеза заранее; неудача лишь отключает голосовые ответы."""
+        started_at = time.perf_counter()
         try:
             await self._tts.ensure_ready()
+            logger.info(
+                "Модель синтеза речи готова за %.1f с", time.perf_counter() - started_at
+            )
         except BotError as exc:
             logger.warning(
                 "Синтез речи недоступен, бот будет выполнять команды молча: %s",
@@ -386,24 +392,88 @@ class MusicCog(commands.Cog, name="Музыка"):
     def _replace_player_view(
         self, view: PlayerView, *, message: discord.Message | discord.InteractionMessage
     ) -> None:
-        """Запоминает новые сообщение и view, останавливая предыдущий view.
+        """Запоминает новые сообщение и view, останавливая предыдущий — но не всегда.
 
         Новый `PlayerView` пересоздаётся при каждом обновлении (см. докстринг
-        класса), а его кнопки получают случайные `custom_id`. discord.py
-        хранит соответствие "сообщение → активные компоненты" во внутреннем
-        `ViewStore`, и при каждой правке с `view=...` добавляет туда записи
-        нового вью, но НЕ убирает записи предыдущего — они с другими
-        `custom_id`, и раз это не единый персистентный вью с фиксированными
-        `custom_id`, стору просто неоткуда узнать, что старый экземпляр уже
-        никому не нужен. Без явной остановки они копились бы там вечно, пока
-        жива волна. `View.stop()` как раз и вызывает `ViewStore.remove_view`,
-        снимая записи именно старого экземпляра.
+        класса), а discord.py хранит соответствие "сообщение → активные
+        компоненты" во внутреннем `ViewStore`: словарь `_views[message_id]`
+        с ключами вида (тип компонента, `custom_id`). `View.stop()` вызывает
+        `ViewStore.remove_view`, которая выбрасывает оттуда ключи
+        останавливаемого вью.
+
+        Отсюда и условие. Кнопки плеера теперь носят ФИКСИРОВАННЫЕ
+        `custom_id` (нужны для персистентности, см. `PlayerView`), поэтому у
+        старого и нового экземпляров ключи совпадают. Если сообщение то же
+        самое (правка на месте), `ViewStore` уже перезаписал записи новым
+        вью — и `old_view.stop()` снял бы ключи НОВОГО экземпляра, оставив
+        сообщение с кнопками, которым не соответствует ни один обработчик.
+        Ровно тот сбой, ради которого всё это чинится: `dispatch_view` молча
+        выходит, бот не отвечает, Discord пишет «Приложение не ответило
+        вовремя», в логе пусто.
+
+        Когда же сообщение сменилось (`_update_player_message` удалила
+        погребённый плеер и выложила новый), ключи старого лежат под другим
+        `message_id`, и остановить его не только безопасно, но и нужно:
+        иначе записи удалённых сообщений копились бы в сторе всю жизнь волны.
+
+        Отдельно отметим, что оставленный в живых старый экземпляр ничем не
+        грозит: `timeout=None` — таймерной задачи за ним не числится, а сам
+        объект освобождается сборщиком, как только на него перестают
+        ссылаться стор и ког.
         """
         old_view = self._player_view
+        old_message = self._player_message
         self._player_message = message
         self._player_view = view
-        if old_view is not None:
+        if old_view is not None and (old_message is None or old_message.id != message.id):
             old_view.stop()
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """Пишет в лог нажатие кнопки плеера по неактуальному сообщению.
+
+        Чисто наблюдательный слушатель: он ничего не чинит и не отвечает
+        пользователю — обработку всё равно делает `PlayerView` штатным путём.
+        Нужен он потому, что до персистентных вью такие нажатия не оставляли
+        В ЛОГЕ ВООБЩЕ НИЧЕГО: `ViewStore.dispatch_view` не находил обработчик
+        и молча выходил, бот не подтверждал interaction, а человек видел
+        только «Приложение не ответило вовремя». Разбирать такой сбой по
+        логу было нечем — отсюда и эта строчка.
+
+        Теперь нажатие на старое сообщение-плеер отработает (персистентный
+        вью ловит его запасным поиском по `message_id=None`), но сам факт
+        стоит видеть: он означает, что у человека в канале висит лишний
+        плеер — например, оставшийся от прошлого запуска бота.
+
+        `discord.Client` рассылает событие `interaction` независимо от того,
+        нашёлся ли обработчик компонента (`ConnectionState.parse_interaction_create`
+        диспатчит его уже после `dispatch_view`), поэтому слушатель видит в
+        том числе и нажатия, которые никуда не дошли.
+
+        Фильтр по `PLAYER_CUSTOM_ID_PREFIX` обязателен: через это же событие
+        проходят компоненты других вью (меню выбора трека из `/search`), и
+        без префикса каждый такой выбор давал бы ложное предупреждение — их
+        сообщения закономерно не совпадают с сообщением-плеером.
+        """
+        if interaction.type is not discord.InteractionType.component:
+            return
+        data = interaction.data or {}
+        custom_id = data.get("custom_id")
+        if not isinstance(custom_id, str) or not custom_id.startswith(PLAYER_CUSTOM_ID_PREFIX):
+            return
+
+        message = interaction.message
+        current = self._player_message
+        if message is None or (current is not None and message.id == current.id):
+            return
+
+        logger.warning(
+            "Нажата кнопка %s на неактуальном сообщении-плеере %s (текущее: %s) — "
+            "вероятно, в канале остался плеер от прошлого запуска бота",
+            custom_id,
+            message.id,
+            current.id if current is not None else "плеера нет",
+        )
 
     async def handle_pause_toggle(self, interaction: discord.Interaction) -> None:
         """Переключает паузу/воспроизведение по кнопке плеера и правит сообщение на месте.
@@ -427,20 +497,35 @@ class MusicCog(commands.Cog, name="Музыка"):
         колбэк `_announce` нового трека (он срабатывает прямо внутри
         `skip()`), либо явный вызов ниже — если волна на этом закончилась и
         анонса не будет.
+
+        Если окно ответа успело закрыться (см. `bot.cogs.interactions.safe_defer`),
+        команда не выполняется вовсе: дальнейший `followup`/`edit_message` всё
+        равно упал бы тем же 404, а тихо пропустить нажатие — значит сделать
+        вид, что кнопка сработала, хотя ничего не произошло.
         """
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="нажатие кнопки «Следующий»")
+            return
         await self._player.skip()
         await self._update_player_message(interaction)
 
     async def handle_disconnect(self, interaction: discord.Interaction) -> None:
-        """Отключает плеер по кнопке — сообщение перейдёт в состояние "завершено"."""
-        await interaction.response.defer()
+        """Отключает плеер по кнопке — сообщение перейдёт в состояние "завершено".
+
+        См. `handle_skip` про то, почему при истёкшем окне ответа
+        (`safe_defer` вернул `False`) команда не выполняется дальше.
+        """
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="нажатие кнопки «Отключить»")
+            return
         await self._player.disconnect()
         await self._update_player_message(interaction)
 
     async def handle_search_query(self, interaction: discord.Interaction, query: str) -> None:
         """Обрабатывает запрос из модального окна поиска — та же ветка, что и у /search."""
-        await interaction.response.defer(thinking=True)
+        if not await safe_defer(interaction, thinking=True):
+            await notify_window_expired(interaction, action="поиск трека")
+            return
         await self._search_and_start(interaction, query)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -465,22 +550,11 @@ class MusicCog(commands.Cog, name="Музыка"):
 
         if isinstance(original, BotError):
             logger.warning("Ошибка команды /%s: %s", command_name, original)
-            await self._send_error(interaction, original.user_message)
+            await respond(interaction, original.user_message)
             return
 
         logger.error("Необработанная ошибка команды /%s", command_name, exc_info=original)
-        await self._send_error(interaction, "Внутренняя ошибка, подробности в логах.")
-
-    @staticmethod
-    async def _send_error(interaction: discord.Interaction, text: str) -> None:
-        """Отправляет текст ошибки с учётом того, был ли ответ уже начат (в т.ч. отложен)."""
-        if interaction.response.is_done():
-            try:
-                await interaction.edit_original_response(content=text)
-            except discord.HTTPException:  # NotFound — её подкласс
-                await interaction.followup.send(text, ephemeral=True)
-        else:
-            await interaction.response.send_message(text, ephemeral=True)
+        await respond(interaction, "Внутренняя ошибка, подробности в логах.")
 
     async def _ensure_connected(self, interaction: discord.Interaction) -> None:
         """Подключается к каналу вызвавшего пользователя, если плеер ещё не в канале.
@@ -513,26 +587,30 @@ class MusicCog(commands.Cog, name="Музыка"):
         канале. Эфемерный followup его никак не резолвит: приватное
         сообщение уходило одному пользователю, а публичный плейсхолдер так и
         оставался висеть нерешённым. `edit_original_response` правит именно
-        тот самый первый ответ — тот же приём, что и в `_send_error` — поэтому
-        плейсхолдер всегда получает финальный текст, каким бы он ни был
-        отложен: публичным (тогда и подтверждение публичное) или эфемерным
-        (`_start_wave` — тогда и подтверждение эфемерное). `embed`/`view`
-        сбрасываются явно: если ответ уже редактировался раньше (например,
+        тот самый первый ответ — тот же приём, что и в
+        `bot.cogs.interactions.respond` — поэтому плейсхолдер всегда
+        получает финальный текст, каким бы он ни был отложен: публичным
+        (тогда и подтверждение публичное) или эфемерным (`_start_wave` —
+        тогда и подтверждение эфемерное). `embed`/`view` сбрасываются явно
+        (`clear_view=True`): если ответ уже редактировался раньше (например,
         `TrackSearchView.handle_selection` подставила туда меню выбора), от
         него не должно остаться следов.
         """
         text = "«Моя волна» запущена — смотрите сообщение-плеер в канале."
-        if interaction.response.is_done():
-            try:
-                await interaction.edit_original_response(content=text, embed=None, view=None)
-            except discord.HTTPException:  # NotFound — её подкласс
-                await interaction.followup.send(text, ephemeral=True)
-        else:
-            await interaction.response.send_message(text, ephemeral=True)
+        await respond(interaction, text, clear_view=True)
 
     async def _start_wave(self, interaction: discord.Interaction) -> None:
-        """Запускает «Мою волну», при необходимости подключаясь к каналу пользователя."""
-        await interaction.response.defer(ephemeral=True)
+        """Запускает «Мою волну», при необходимости подключаясь к каналу пользователя.
+
+        Общий обработчик команд `/wave` и `/play` — отсюда имя действия для
+        `notify_window_expired` берётся из самого `interaction.command`, а не
+        захардкожено под одну из двух команд.
+        """
+        if not await safe_defer(interaction, ephemeral=True):
+            command = interaction.command
+            action = f"/{command.qualified_name}" if command is not None else "запуск волны"
+            await notify_window_expired(interaction, action=action)
+            return
         await self._ensure_connected(interaction)
         await self._player.start_wave()
         await self._send_started_ack(interaction)
@@ -924,7 +1002,9 @@ class MusicCog(commands.Cog, name="Музыка"):
     @app_commands.guild_only()
     async def join(self, interaction: discord.Interaction) -> None:
         """Подключает бота к голосовому каналу пользователя, вызвавшего команду."""
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="/join")
+            return
         channel = _voice_channel_of(interaction)
         await self._player.connect(channel)
         await interaction.followup.send(f"Подключился к каналу «{channel.name}».")
@@ -933,7 +1013,9 @@ class MusicCog(commands.Cog, name="Музыка"):
     @app_commands.guild_only()
     async def leave(self, interaction: discord.Interaction) -> None:
         """Отключает бота от голосового канала."""
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="/leave")
+            return
         await self._player.disconnect()
         await interaction.followup.send("Отключился от голосового канала.")
 
@@ -954,14 +1036,18 @@ class MusicCog(commands.Cog, name="Музыка"):
     @app_commands.guild_only()
     async def search(self, interaction: discord.Interaction, query: str) -> None:
         """Ищет треки по запросу: один найденный — сразу волна от него, несколько — меню выбора."""
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="/search")
+            return
         await self._search_and_start(interaction, query)
 
     @app_commands.command(name="skip", description="Пропустить текущий трек")
     @app_commands.guild_only()
     async def skip(self, interaction: discord.Interaction) -> None:
         """Пропускает текущий воспроизводимый трек и синхронизирует сообщение-плеер."""
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="/skip")
+            return
         next_track = await self._player.skip()
         if next_track is None:
             await interaction.followup.send("Трек пропущен.")
@@ -1020,7 +1106,9 @@ class MusicCog(commands.Cog, name="Музыка"):
             current = self._player.bass.label
             await interaction.response.send_message(f"Текущий уровень бас-буста: {current}.")
             return
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            await notify_window_expired(interaction, action="/bass")
+            return
         new_level = BassLevel(level.value)
         await self._player.set_bass(new_level)
         await interaction.followup.send(f"Уровень бас-буста установлен: {new_level.label}.")
@@ -1054,7 +1142,9 @@ class MusicCog(commands.Cog, name="Музыка"):
         text: app_commands.Range[str, 1, MAX_TEXT_LENGTH],
     ) -> None:
         """Озвучивает фразу в голосовом канале, приостановив музыку на её время."""
-        await interaction.response.defer(ephemeral=True)
+        if not await safe_defer(interaction, ephemeral=True):
+            await notify_window_expired(interaction, action="/say")
+            return
         await self._ensure_connected(interaction)
         spoken = await self.say_text(text)
         await interaction.followup.send(

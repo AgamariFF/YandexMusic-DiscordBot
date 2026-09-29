@@ -477,6 +477,319 @@ class TestYandexMusicClientResolveStream:
             await client.resolve_stream_url(track)
 
 
+class TestYandexMusicClientResolveStreamRetries:
+    """Tests for resolve_stream_url retry behavior."""
+
+    @pytest.mark.asyncio
+    async def test_first_call_retries_on_yandex_music_error_and_succeeds(
+        self, monkeypatch
+    ):
+        """get_download_info_async fails twice, succeeds on third attempt."""
+        async def fake_sleep(seconds):
+            pass
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        track_raw = SimpleNamespace()
+        info = SimpleNamespace(
+            codec="mp3",
+            preview=False,
+            bitrate_in_kbps=320,
+            direct="",
+            get_direct_link_async=AsyncMock(return_value="https://stream.url"),
+        )
+        track_raw.get_download_info_async = AsyncMock(
+            side_effect=[
+                yandex_music.exceptions.YandexMusicError("error1"),
+                yandex_music.exceptions.YandexMusicError("error2"),
+                [info],
+            ]
+        )
+
+        client = YandexMusicClient("token123")
+        client._client = MagicMock()
+
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            cover_url="https://example.com/cover.jpg",
+            raw=track_raw,
+        )
+        url = await client.resolve_stream_url(track)
+
+        assert url == "https://stream.url"
+        assert track_raw.get_download_info_async.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_first_call_exhausts_retries_raises_track_unavailable(
+        self, monkeypatch
+    ):
+        """get_download_info_async fails all MAX_ATTEMPTS times."""
+        async def fake_sleep(seconds):
+            pass
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        track_raw = SimpleNamespace()
+        track_raw.get_download_info_async = AsyncMock(
+            side_effect=yandex_music.exceptions.YandexMusicError("persistent error")
+        )
+
+        client = YandexMusicClient("token123")
+        client._client = MagicMock()
+
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            cover_url="https://example.com/cover.jpg",
+            raw=track_raw,
+        )
+
+        with pytest.raises(TrackUnavailableError):
+            await client.resolve_stream_url(track)
+
+        assert (
+            track_raw.get_download_info_async.call_count
+            == YandexMusicClient.STREAM_URL_MAX_ATTEMPTS
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_call_unauthorized_error_no_retry(self):
+        """get_download_info_async raises UnauthorizedError → YandexAuthError,
+        no retries.
+        """
+        track_raw = SimpleNamespace()
+        track_raw.get_download_info_async = AsyncMock(
+            side_effect=yandex_music.exceptions.UnauthorizedError("invalid token")
+        )
+
+        client = YandexMusicClient("token123")
+        client._client = MagicMock()
+
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            cover_url="https://example.com/cover.jpg",
+            raw=track_raw,
+        )
+
+        with pytest.raises(YandexAuthError):
+            await client.resolve_stream_url(track)
+
+        assert track_raw.get_download_info_async.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_second_call_retries_on_yandex_music_error_and_succeeds(
+        self, monkeypatch
+    ):
+        """get_direct_link_async fails once, succeeds on second attempt."""
+        async def fake_sleep(seconds):
+            pass
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        track_raw = SimpleNamespace()
+        info = SimpleNamespace(
+            codec="mp3",
+            preview=False,
+            bitrate_in_kbps=320,
+            direct="",
+            get_direct_link_async=AsyncMock(
+                side_effect=[
+                    yandex_music.exceptions.YandexMusicError("network error"),
+                    "https://direct.url",
+                ]
+            ),
+        )
+        track_raw.get_download_info_async = AsyncMock(return_value=[info])
+
+        client = YandexMusicClient("token123")
+        client._client = MagicMock()
+
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            cover_url="https://example.com/cover.jpg",
+            raw=track_raw,
+        )
+        url = await client.resolve_stream_url(track)
+
+        assert url == "https://direct.url"
+        assert info.get_direct_link_async.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_second_call_exhausts_retries_raises_track_unavailable(
+        self, monkeypatch
+    ):
+        """get_direct_link_async fails all MAX_ATTEMPTS times."""
+        async def fake_sleep(seconds):
+            pass
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        track_raw = SimpleNamespace()
+        info = SimpleNamespace(
+            codec="mp3",
+            preview=False,
+            bitrate_in_kbps=320,
+            direct="",
+            get_direct_link_async=AsyncMock(
+                side_effect=yandex_music.exceptions.YandexMusicError("persistent error")
+            ),
+        )
+        track_raw.get_download_info_async = AsyncMock(return_value=[info])
+
+        client = YandexMusicClient("token123")
+        client._client = MagicMock()
+
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            cover_url="https://example.com/cover.jpg",
+            raw=track_raw,
+        )
+
+        with pytest.raises(TrackUnavailableError):
+            await client.resolve_stream_url(track)
+
+        assert (
+            info.get_direct_link_async.call_count
+            == YandexMusicClient.STREAM_URL_MAX_ATTEMPTS
+        )
+
+    @pytest.mark.asyncio
+    async def test_second_call_unauthorized_error_no_retry(self):
+        """get_direct_link_async raises UnauthorizedError → YandexAuthError,
+        no retries.
+        """
+        track_raw = SimpleNamespace()
+        info = SimpleNamespace(
+            codec="mp3",
+            preview=False,
+            bitrate_in_kbps=320,
+            direct="",
+            get_direct_link_async=AsyncMock(
+                side_effect=yandex_music.exceptions.UnauthorizedError("invalid token")
+            ),
+        )
+        track_raw.get_download_info_async = AsyncMock(return_value=[info])
+
+        client = YandexMusicClient("token123")
+        client._client = MagicMock()
+
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            cover_url="https://example.com/cover.jpg",
+            raw=track_raw,
+        )
+
+        with pytest.raises(YandexAuthError):
+            await client.resolve_stream_url(track)
+
+        assert info.get_direct_link_async.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_delays_grow_exponentially(self, monkeypatch):
+        """Retry delays follow formula: RETRY_DELAY_SECONDS * 2^(attempt-1).
+        After last failed attempt, no sleep occurs.
+        """
+        delays: list[float] = []
+
+        async def recording_sleep(seconds):
+            delays.append(seconds)
+
+        monkeypatch.setattr("asyncio.sleep", recording_sleep)
+
+        track_raw = SimpleNamespace()
+        track_raw.get_download_info_async = AsyncMock(
+            side_effect=yandex_music.exceptions.YandexMusicError("error")
+        )
+
+        client = YandexMusicClient("token123")
+        client._client = MagicMock()
+
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            cover_url="https://example.com/cover.jpg",
+            raw=track_raw,
+        )
+
+        with pytest.raises(TrackUnavailableError):
+            await client.resolve_stream_url(track)
+
+        # Expected delays: 0.5 * 2^0 = 0.5, 0.5 * 2^1 = 1.0
+        # After 3rd attempt (last), no sleep
+        expected_delays = [
+            YandexMusicClient.STREAM_URL_RETRY_DELAY_SECONDS * (2 ** i)
+            for i in range(YandexMusicClient.STREAM_URL_MAX_ATTEMPTS - 1)
+        ]
+        assert delays == expected_delays
+        assert len(delays) == YandexMusicClient.STREAM_URL_MAX_ATTEMPTS - 1
+
+    @pytest.mark.asyncio
+    async def test_os_error_retries_like_yandex_music_error(self, monkeypatch):
+        """OSError is retried same as YandexMusicError."""
+        async def fake_sleep(seconds):
+            pass
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        track_raw = SimpleNamespace()
+        info = SimpleNamespace(
+            codec="mp3",
+            preview=False,
+            bitrate_in_kbps=320,
+            direct="",
+            get_direct_link_async=AsyncMock(return_value="https://stream.url"),
+        )
+        track_raw.get_download_info_async = AsyncMock(
+            side_effect=[
+                OSError("connection failed"),
+                [info],
+            ]
+        )
+
+        client = YandexMusicClient("token123")
+        client._client = MagicMock()
+
+        track = TrackInfo(
+            id="1",
+            feedback_id="1:1",
+            title="Song",
+            artists="Artist",
+            duration=180.0,
+            cover_url="https://example.com/cover.jpg",
+            raw=track_raw,
+        )
+        url = await client.resolve_stream_url(track)
+
+        assert url == "https://stream.url"
+        assert track_raw.get_download_info_async.call_count == 2
+
+
 class TestTrackInfoDisplay:
     """Tests for TrackInfo.display property."""
 
