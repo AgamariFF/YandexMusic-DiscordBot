@@ -1,0 +1,36 @@
+# Контекст сборки намеренно узкий: всё тяжёлое и всё секретное сюда не
+# попадает. Особенно .env — переменные передаются контейнеру в рантайме
+# (env_file в docker-compose.yml), а не запекаются в слои образа, откуда
+# их потом достанет любой, у кого есть образ.
+.env
+.env.*
+!.env.example
+
+# Модели (гигабайты) монтируются томом, см. комментарий в Dockerfile.
+models/
+
+# Логи содержат расшифровки речи из голосового канала — им не место ни в
+# образе, ни в контексте сборки.
+logs/
+
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+.git/
+.gitignore
+.github/
+
+.pytest_cache/
+.ruff_cache/
+tests/
+
+.claude/
+docs/
+run.bat
+README.md
+Dockerfile
+.dockerignore
+docker-compose.yml

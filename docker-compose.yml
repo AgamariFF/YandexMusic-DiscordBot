@@ -1,0 +1,42 @@
+services:
+  bot:
+    build: .
+    image: yandex-wave-bot:latest
+    container_name: yandex-wave-bot
+
+    # Настройки читаются из .env — того же файла, что и при запуске без
+    # контейнера. В образ он не попадает (см. .dockerignore), поэтому на
+    # сервере его нужно положить рядом с docker-compose.yml.
+    env_file:
+      - .env
+
+    volumes:
+      # Модель распознавания речи. В образ не зашита: vosk-model-ru-0.42
+      # весит около двух гигабайт, скачивается по инструкции из README и
+      # живёт рядом с проектом. Путь внутри контейнера совпадает с
+      # SPEECH_MODEL_PATH (по умолчанию models/vosk-model-ru-0.42
+      # относительно рабочего каталога /app).
+      - ./models:/app/models:ro
+      # Логи наружу, чтобы переживали пересоздание контейнера.
+      - ./logs:/app/logs
+      # Кэш vosk-tts: модель синтеза скачивается сама при первой фразе,
+      # без тома это повторялось бы после каждого docker compose up --build.
+      - vosk-cache:/home/appuser/.cache/vosk
+
+    # Бот сам переподключается к Discord, но от падения процесса это не
+    # спасает — перезапуск отдан демону. "unless-stopped", а не "always":
+    # остановленный руками контейнер не должен подниматься сам после
+    # перезагрузки сервера.
+    restart: unless-stopped
+
+    # Логи ротируются средствами демона: бот пишет и в файл (logs/bot.log,
+    # свой RotatingFileHandler), и в stdout, и вторая копия без предела
+    # росла бы бесконечно.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  vosk-cache:
